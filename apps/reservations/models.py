@@ -3,6 +3,7 @@ from django.db import models
 from django.core.exceptions import ValidationError
 from apps.laboratoires.models import Laboratoire
 from apps.equipements.models import Equipement
+from django.utils import timezone
 
 
 class StatutReservation(models.TextChoices):
@@ -24,8 +25,8 @@ class Reservation(models.Model):
     laboratoire = models.ForeignKey(
         Laboratoire, on_delete=models.CASCADE, related_name='reservations'
     )
-    equipement = models.ForeignKey(
-        Equipement, on_delete=models.CASCADE, related_name='reservations', null=True, blank=True
+    equipements = models.ManyToManyField(
+        Equipement, blank=True, related_name='reservations'
     )
 
     date = models.DateField()
@@ -47,69 +48,78 @@ class Reservation(models.Model):
     def __str__(self):
         return f'{self.demandeur} — {self.laboratoire} — {self.date}'
 
-    # --- Validation métier ---
-
     def clean(self):
         if self.heure_fin <= self.heure_debut:
             raise ValidationError("L'heure de fin doit être après l'heure de début.")
 
-        if self.equipement and self.equipement.laboratoire_id != self.laboratoire_id:
-            raise ValidationError("L'équipement sélectionné n'appartient pas à ce laboratoire.")
+    @staticmethod
+    def _verifier_equipements(laboratoire, equipements_ids):
+        if not equipements_ids:
+            return
+        trouves = Equipement.objects.filter(
+            id__in=equipements_ids, laboratoire=laboratoire
+        ).count()
+        if trouves != len(set(equipements_ids)):
+            raise ValidationError(
+                "Un ou plusieurs équipements sélectionnés n'appartiennent pas à ce laboratoire."
+            )
 
-        if self.a_un_conflit():
-            raise ValidationError("Ce créneau est déjà réservé ou en attente sur cet équipement.")
-
-    # --- Détection de chevauchement (uniquement sur l'équipement) ---
-
-    def a_un_conflit(self):
+    @classmethod
+    def _a_un_conflit(cls, date, heure_debut, heure_fin, equipements_ids, exclure_pk=None):
         """
-        Vérifie s'il existe déjà une réservation EN_ATTENTE ou VALIDEE
-        sur le même équipement qui chevauche cette plage horaire.
-        Retourne False si aucun équipement n'est réservé (pas de conflit
-        possible sur le laboratoire seul, il n'est pas exclusif).
+        Vérifie le chevauchement pour CHAQUE équipement sélectionné :
+        s'il en existe un seul déjà pris sur ce créneau, la réservation
+        entière est refusée (pas de réservation partielle possible).
         """
-        if not self.equipement:
+        if not equipements_ids:
             return False
-
-        conflits = Reservation.objects.filter(
-            equipement=self.equipement,
-            date=self.date,
+        qs = cls.objects.filter(
+            equipements__id__in=equipements_ids,
+            date=date,
             statut__in=[StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE],
-            heure_debut__lt=self.heure_fin,
-            heure_fin__gt=self.heure_debut,
-        ).exclude(pk=self.pk)
+            heure_debut__lt=heure_fin,
+            heure_fin__gt=heure_debut,
+        ).distinct()
+        if exclure_pk:
+            qs = qs.exclude(pk=exclure_pk)
+        return qs.exists()
 
-        return conflits.exists()
-
-    # --- Cycle de vie ---
-
-    def creer(self):
+    def creer(self, equipements_ids=None):
         """
-        Applique la règle RG2/RG3 : confirmation immédiate pour un membre
-        du laboratoire, mise en attente pour un étudiant.
+        Applique RG2/RG3, puis assigne les équipements APRÈS la sauvegarde :
+        un ManyToMany ne peut pas être défini sur un objet qui n'a pas
+        encore de pk en base — contrainte propre aux relations M2M.
         """
         from apps.utilisateurs.models import Role
 
-        if self.demandeur.role == Role.ETUDIANT:
-            self.statut = StatutReservation.EN_ATTENTE
-        else:
-            self.statut = StatutReservation.VALIDEE
+        equipements_ids = equipements_ids or []
 
-        self.full_clean()   # déclenche clean(), qui vérifie maintenant le conflit
+        self.full_clean(exclude=['equipements'])
+        self._verifier_equipements(self.laboratoire, equipements_ids)
+
+        if self._a_un_conflit(self.date, self.heure_debut, self.heure_fin, equipements_ids):
+            raise ValidationError(
+                "Un des équipements sélectionnés est déjà réservé ou en attente sur ce créneau."
+            )
+
+        self.statut = (
+            StatutReservation.EN_ATTENTE if self.demandeur.role == Role.ETUDIANT
+            else StatutReservation.VALIDEE
+        )
         self.save()
+        if equipements_ids:
+            self.equipements.set(equipements_ids)
         return self
 
     def valider(self, validateur):
         self.statut = StatutReservation.VALIDEE
         self.validateur = validateur
-        from django.utils import timezone
         self.date_validation = timezone.now()
         self.save(update_fields=['statut', 'validateur', 'date_validation'])
 
     def refuser(self, validateur):
         self.statut = StatutReservation.REFUSEE
         self.validateur = validateur
-        from django.utils import timezone
         self.date_validation = timezone.now()
         self.save(update_fields=['statut', 'validateur', 'date_validation'])
 
@@ -117,12 +127,6 @@ class Reservation(models.Model):
         self.statut = StatutReservation.ANNULEE
         self.save(update_fields=['statut'])
 
-    def modifier(self, **champs):
-        for champ, valeur in champs.items():
-            setattr(self, champ, valeur)
-        self.full_clean()
-        self.save()
-        
     def archiver(self):
         self.est_archivee = True
         self.save(update_fields=['est_archivee'])

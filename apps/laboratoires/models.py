@@ -11,6 +11,7 @@ class Laboratoire(models.Model):
     nom = models.CharField(max_length=150)
     description = models.TextField(blank=True)
     localisation = models.CharField(max_length=150)
+    capacite = models.PositiveIntegerField(null=True, blank=True)
     statut = models.CharField(
         max_length=20, choices=StatutLaboratoire.choices, default=StatutLaboratoire.DISPONIBLE
     )

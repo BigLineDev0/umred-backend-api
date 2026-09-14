@@ -27,6 +27,10 @@ class EquipementViewSet(viewsets.ModelViewSet):
         laboratoire_id = self.request.query_params.get('laboratoire')
         if laboratoire_id:
             qs = qs.filter(laboratoire_id=laboratoire_id)
+            
+        equipement_id = self.request.query_params.get('equipement')
+        if equipement_id:
+            qs = qs.filter(equipement_id=equipement_id)
         return qs
 
     def perform_create(self, serializer):

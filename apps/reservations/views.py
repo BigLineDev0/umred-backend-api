@@ -39,14 +39,32 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        inclure_archivees = self.request.query_params.get('archivees') == 'true'
+        est_superviseur = user.role in [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
+        laboratoire_id = self.request.query_params.get('laboratoire')
+        inclure_toutes = self.request.query_params.get('all') == 'true'
 
-        if user.role in [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]:
-            qs = Reservation.objects.all()
+        if self.action == 'list':
+            if inclure_toutes and est_superviseur:
+                qs = Reservation.objects.all()
+            elif laboratoire_id:
+                # Planning d'un laboratoire : visible par tout utilisateur
+                # connecté (utile pour choisir un créneau libre avant de
+                # réserver), mais limité aux réservations déjà VALIDEES —
+                # les demandes encore en attente restent privées.
+                qs = Reservation.objects.filter(statut=StatutReservation.VALIDEE)
+            else:
+                qs = Reservation.objects.filter(demandeur=user)
         else:
-            qs = Reservation.objects.filter(demandeur=user)
+            qs = Reservation.objects.all() if est_superviseur else Reservation.objects.filter(demandeur=user)
 
-        if not inclure_archivees:
+        if laboratoire_id:
+            qs = qs.filter(laboratoire_id=laboratoire_id)
+
+        if self.request.query_params.get('a_venir') == 'true':
+            from django.utils import timezone
+            qs = qs.filter(date__gte=timezone.now().date())
+
+        if self.request.query_params.get('archivees') != 'true':
             qs = qs.exclude(est_archivee=True)
 
         return qs
@@ -54,36 +72,34 @@ class ReservationViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        equipements = data.pop('equipements', [])  # liste d'instances Equipement, déjà résolues par DRF
 
         reservation = Reservation(
             demandeur=request.user,
-            laboratoire=serializer.validated_data['laboratoire'],
-            equipement=serializer.validated_data.get('equipement'),
-            date=serializer.validated_data['date'],
-            heure_debut=serializer.validated_data['heure_debut'],
-            heure_fin=serializer.validated_data['heure_fin'],
-            motif=serializer.validated_data['motif'],
+            laboratoire=data['laboratoire'],
+            date=data['date'],
+            heure_debut=data['heure_debut'],
+            heure_fin=data['heure_fin'],
+            motif=data['motif'],
         )
+
         try:
-            reservation.creer()
+            reservation.creer(equipements_ids=[e.id for e in equipements])
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages if hasattr(e, 'messages') else str(e))
 
-        # Enregistrement de logs
         journaliser(request.user, 'Création de réservation', reservation,
                     f'Statut initial : {reservation.statut}')
-        
-        # Envoie notifications
+
         if reservation.statut == StatutReservation.EN_ATTENTE:
             validateurs = Utilisateur.objects.filter(
                 role__in=[Role.TECHNICIEN, Role.CHERCHEUR], statut_compte=StatutCompte.ACTIF
             )
             for validateur in validateurs:
-                notifier(
-                    validateur, 'Nouvelle demande de réservation',
-                    f'{request.user} a soumis une demande pour le {reservation.date}.',
-                    TypeNotification.RESERVATION, reservation
-                )
+                notifier(validateur, 'Nouvelle demande de réservation',
+                        f'{request.user} a soumis une demande pour le {reservation.date}.',
+                        TypeNotification.RESERVATION, reservation)
 
         return Response(self.get_serializer(reservation).data, status=status.HTTP_201_CREATED)
 
