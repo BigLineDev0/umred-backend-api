@@ -25,8 +25,12 @@ class EquipementViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         laboratoire_id = self.request.query_params.get('laboratoire')
+        statut = self.request.query_params.get('statut')
+        
         if laboratoire_id:
             qs = qs.filter(laboratoire_id=laboratoire_id)
+        if statut:
+            qs = qs.filter(statut=statut)
             
         equipement_id = self.request.query_params.get('equipement')
         if equipement_id:

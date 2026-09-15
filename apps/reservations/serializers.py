@@ -12,9 +12,9 @@ class ReservationSerializer(serializers.ModelSerializer):
             'id', 'demandeur', 'demandeur_nom', 'validateur',
             'laboratoire', 'laboratoire_nom', 'equipements', 'equipements_noms',
             'date', 'heure_debut', 'heure_fin', 'motif',
-            'statut', 'date_creation', 'date_validation',
+            'statut', 'est_archivee', 'date_creation', 'date_validation',
         ]
-        read_only_fields = ['demandeur', 'validateur', 'statut', 'date_creation', 'date_validation']
+        read_only_fields = ['demandeur', 'validateur', 'statut', 'est_archivee', 'date_creation', 'date_validation']
 
     def get_equipements_noms(self, obj):
         return [e.nom for e in obj.equipements.all()]

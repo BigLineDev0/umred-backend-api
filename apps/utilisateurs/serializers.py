@@ -1,5 +1,7 @@
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
+from django.contrib.auth.models import update_last_login
+from apps.core.services import enregistrer as journaliser
 from .models import StatutCompte
 
 from rest_framework import serializers
@@ -15,6 +17,9 @@ class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
                 "Ce compte n'est pas encore actif. Contactez un administrateur.",
                 code='compte_inactif'
             )
+
+        update_last_login(None, self.user)
+        journaliser(self.user, 'Connexion à la plateforme', self.user)
 
         data['role'] = self.user.role
         data['nom'] = self.user.nom
@@ -37,3 +42,20 @@ class RegisterSerializer(serializers.ModelSerializer):
             prenom=validated_data['prenom'],
             role=Role.ETUDIANT,   # jamais fourni par le client, toujours forcé ici
         )
+        
+class UtilisateurSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Utilisateur
+        fields = ['id', 'nom', 'prenom', 'email', 'telephone', 'role', 'statut_compte', 'date_creation', 'last_login']
+        read_only_fields = ['statut_compte', 'date_creation', 'last_login']
+
+
+class UtilisateurCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Utilisateur
+        fields = ['nom', 'prenom', 'email', 'telephone', 'role']
+
+    def validate_email(self, value):
+        if Utilisateur.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError('Un compte existe déjà avec cette adresse email.')
+        return value

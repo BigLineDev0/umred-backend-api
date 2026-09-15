@@ -31,6 +31,28 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy', 'demarrer', 'cloturer']:
             return [EstTechnicienOuAdmin()]
         return super().get_permissions()
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        equipement_id = self.request.query_params.get('equipement')
+        statut = self.request.query_params.get('statut')
+        type_ = self.request.query_params.get('type')
+        date_debut = self.request.query_params.get('date_debut')
+        
+        date_fin = self.request.query_params.get('date_fin')
+        
+        if date_debut:
+            qs = qs.filter(date_planifiee__date__gte=date_debut)
+        if date_fin:
+            qs = qs.filter(date_planifiee__date__lte=date_fin)
+            
+        if equipement_id:
+            qs = qs.filter(equipement_id=equipement_id)
+        if statut:
+            qs = qs.filter(statut=statut)
+        if type_:
+            qs = qs.filter(type=type_)
+        return qs
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

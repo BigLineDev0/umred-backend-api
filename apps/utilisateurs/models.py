@@ -61,7 +61,7 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         ordering = ['nom', 'prenom']
 
     def __str__(self):
-        return f'{self.prenom} {self.nom} ({self.get_role_display()})'
+        return f'{self.prenom} {self.nom}'
 
     def activer_compte(self):
         self.statut_compte = StatutCompte.ACTIF

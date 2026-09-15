@@ -28,11 +28,11 @@ class EstAdmin(permissions.BasePermission):
 
 
 class ReservationViewSet(viewsets.ModelViewSet):
+    queryset = Reservation.objects.all()   # ajouté — requis par DRF
     serializer_class = ReservationSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_permissions(self):
-        # La suppression physique est réservée à l'admin, en dernier recours seulement
         if self.action == 'destroy':
             return [EstAdmin()]
         return super().get_permissions()
@@ -41,31 +41,40 @@ class ReservationViewSet(viewsets.ModelViewSet):
         user = self.request.user
         est_superviseur = user.role in [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
         laboratoire_id = self.request.query_params.get('laboratoire')
+        date_debut = self.request.query_params.get('date_debut')
+        date_fin = self.request.query_params.get('date_fin')
+        statut = self.request.query_params.get('statut')
         inclure_toutes = self.request.query_params.get('all') == 'true'
 
         if self.action == 'list':
             if inclure_toutes and est_superviseur:
                 qs = Reservation.objects.all()
             elif laboratoire_id:
-                # Planning d'un laboratoire : visible par tout utilisateur
-                # connecté (utile pour choisir un créneau libre avant de
-                # réserver), mais limité aux réservations déjà VALIDEES —
-                # les demandes encore en attente restent privées.
                 qs = Reservation.objects.filter(statut=StatutReservation.VALIDEE)
             else:
                 qs = Reservation.objects.filter(demandeur=user)
+
+            # L'exclusion des archivées ne concerne QUE le parcours de liste
+            # (naviguer/afficher). Une action ciblée par ID (valider, annuler,
+            # et surtout désarchiver) doit toujours pouvoir atteindre son objet,
+            # peu importe son statut d'archivage.
+            if self.request.query_params.get('archivees') != 'true':
+                qs = qs.exclude(est_archivee=True)
+
+            if self.request.query_params.get('a_venir') == 'true':
+                from django.utils import timezone
+                qs = qs.filter(date__gte=timezone.now().date())
         else:
             qs = Reservation.objects.all() if est_superviseur else Reservation.objects.filter(demandeur=user)
 
         if laboratoire_id:
             qs = qs.filter(laboratoire_id=laboratoire_id)
-
-        if self.request.query_params.get('a_venir') == 'true':
-            from django.utils import timezone
-            qs = qs.filter(date__gte=timezone.now().date())
-
-        if self.request.query_params.get('archivees') != 'true':
-            qs = qs.exclude(est_archivee=True)
+        if date_debut:
+            qs = qs.filter(date__gte=date_debut)
+        if date_fin:
+            qs = qs.filter(date__lte=date_fin)
+        if statut:
+            qs = qs.filter(statut=statut)
 
         return qs
 
