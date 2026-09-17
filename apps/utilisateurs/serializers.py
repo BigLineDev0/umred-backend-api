@@ -9,6 +9,14 @@ from .models import Utilisateur, Role
 
 
 class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token['role'] = user.role  # accessible par FastAPI sans rappeler Django
+        token['prenom'] = user.prenom
+        token['nom'] = user.nom
+        return token
+    
     def validate(self, attrs):
         data = super().validate(attrs)
 

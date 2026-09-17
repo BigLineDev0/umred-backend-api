@@ -111,6 +111,27 @@ class ReservationViewSet(viewsets.ModelViewSet):
                         TypeNotification.RESERVATION, reservation)
 
         return Response(self.get_serializer(reservation).data, status=status.HTTP_201_CREATED)
+    
+    @action(detail=False, methods=['get'])
+    def creneaux_occupes(self, request):
+        """
+        Lecture seule : renvoie les plages déjà prises sur un équipement,
+        pour que l'assistant puisse calculer les créneaux LIBRES sans
+        dupliquer la logique de conflit déjà posée dans le modèle.
+        """
+        equipement_id = request.query_params.get('equipement')
+        date_debut = request.query_params.get('date_debut')
+        date_fin = request.query_params.get('date_fin')
+
+        qs = Reservation.objects.filter(statut__in=[StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE])
+        if equipement_id:
+            qs = qs.filter(equipements__id=equipement_id)
+        if date_debut:
+            qs = qs.filter(date__gte=date_debut)
+        if date_fin:
+            qs = qs.filter(date__lte=date_fin)
+
+        return Response(list(qs.values('date', 'heure_debut', 'heure_fin')))
 
     @action(detail=True, methods=['post'], permission_classes=[EstValidateur])
     def valider(self, request, pk=None):
