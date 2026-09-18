@@ -134,3 +134,6 @@ EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='UMRED Labo <no-reply@umred.sn>')
 
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:4200')
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'

@@ -6,6 +6,9 @@ from apps.utilisateurs.views import LogoutView
 
 from apps.utilisateurs.views import RegisterView, UmredTokenObtainPairView
 
+from django.conf import settings
+from django.conf.urls.static import static
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
@@ -24,4 +27,7 @@ urlpatterns = [
     path('api/notifications/', include('apps.notifications.urls')),
     path('api/utilisateurs/', include('apps.utilisateurs.urls')),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 

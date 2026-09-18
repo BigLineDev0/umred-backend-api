@@ -39,6 +39,7 @@ class Reservation(models.Model):
     est_archivee = models.BooleanField(default=False)
     date_creation = models.DateTimeField(auto_now_add=True)
     date_validation = models.DateTimeField(null=True, blank=True)
+    rappel_envoye = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = 'Réservation'

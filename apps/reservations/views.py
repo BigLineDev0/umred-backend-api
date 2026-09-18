@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from apps.core.services import enregistrer as journaliser
 
-from apps.notifications.services import notifier
+from apps.notifications.services import notifier, notifier_par_email
 from apps.notifications.models import TypeNotification
 from apps.utilisateurs.models import Utilisateur, StatutCompte
 
@@ -13,7 +13,8 @@ from .models import Reservation
 from apps.reservations.models import StatutReservation
 from .serializers import ReservationSerializer
 from apps.utilisateurs.models import Role
-
+from django.utils import timezone
+from datetime import timedelta
 
 class EstValidateur(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -109,6 +110,17 @@ class ReservationViewSet(viewsets.ModelViewSet):
                 notifier(validateur, 'Nouvelle demande de réservation',
                         f'{request.user} a soumis une demande pour le {reservation.date}.',
                         TypeNotification.RESERVATION, reservation)
+                
+        else:
+            # Cas RG2 : confirmation immédiate (chercheur/technicien/admin) —
+            # personne d'autre ne va "valider" cette réservation, donc c'est ICI
+            # et seulement ici que le demandeur doit être notifié par email.
+            notifier_par_email(reservation.demandeur, "confirmation", {
+                "laboratoire": reservation.laboratoire.nom,
+                "date": str(reservation.date),
+                "heure_debut": str(reservation.heure_debut),
+                "heure_fin": str(reservation.heure_fin),
+            })
 
         return Response(self.get_serializer(reservation).data, status=status.HTTP_201_CREATED)
     
@@ -145,6 +157,11 @@ class ReservationViewSet(viewsets.ModelViewSet):
         notifier(reservation.demandeur, 'Réservation validée',
                  f'Votre réservation du {reservation.date} a été validée.',
                  TypeNotification.VALIDATION, reservation)
+        
+        notifier_par_email(reservation.demandeur, "validation", {
+            "laboratoire": reservation.laboratoire.nom,
+            "date": str(reservation.date),
+        })
         return Response(self.get_serializer(reservation).data)
 
     @action(detail=True, methods=['post'], permission_classes=[EstValidateur])
@@ -157,6 +174,11 @@ class ReservationViewSet(viewsets.ModelViewSet):
         notifier(reservation.demandeur, 'Réservation refusée',
                  f'Votre réservation du {reservation.date} a été refusée.',
                  TypeNotification.VALIDATION, reservation)
+        
+        notifier_par_email(reservation.demandeur, "refus", {
+            "laboratoire": reservation.laboratoire.nom,
+            "date": str(reservation.date),
+        })
         return Response(self.get_serializer(reservation).data)
 
     @action(detail=True, methods=['post'])
@@ -179,3 +201,31 @@ class ReservationViewSet(viewsets.ModelViewSet):
         reservation.desarchiver()
         journaliser(request.user, 'Désarchivage de réservation', reservation)
         return Response(self.get_serializer(reservation).data)
+    
+
+
+    @action(detail=False, methods=['get'])
+    def a_rappeler(self, request):
+        """
+        Réservations validées dont le créneau démarre dans les 2 prochaines
+        heures, et pour lesquelles aucun rappel n'a encore été envoyé.
+        """
+        maintenant = timezone.localtime()
+        dans_deux_heures = maintenant + timedelta(hours=2)
+
+        qs = Reservation.objects.filter(
+            statut=StatutReservation.VALIDEE,
+            rappel_envoye=False,
+            date=maintenant.date(),
+            heure_debut__gte=maintenant.time(),
+            heure_debut__lte=dans_deux_heures.time(),
+        )
+        return Response(self.get_serializer(qs, many=True).data)
+
+
+    @action(detail=True, methods=['post'], permission_classes=[EstAdmin])
+    def marquer_rappel_envoye(self, request, pk=None):
+        reservation = self.get_object()
+        reservation.rappel_envoye = True
+        reservation.save(update_fields=['rappel_envoye'])
+        return Response(status=status.HTTP_204_NO_CONTENT)

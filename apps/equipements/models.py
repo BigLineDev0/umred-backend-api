@@ -20,6 +20,9 @@ class Equipement(models.Model):
     date_acquisition = models.DateField(null=True, blank=True)
     statut = models.CharField(max_length=20, choices=StatutEquipement.choices, default=StatutEquipement.DISPONIBLE)
     date_creation = models.DateTimeField(auto_now_add=True)
+    instructions_utilisation = models.TextField(blank=True)
+    consignes_securite = models.TextField(blank=True)
+    manuel_pdf = models.FileField(upload_to='manuels_equipements/', blank=True, null=True)
 
     class Meta:
         verbose_name = 'Équipement'

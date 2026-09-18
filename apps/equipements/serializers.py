@@ -10,5 +10,13 @@ class EquipementSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'laboratoire', 'laboratoire_nom', 'nom', 'description',
             'marque', 'modele', 'numero_serie', 'statut', 'date_creation',
+            'instructions_utilisation', 'consignes_securite', 'manuel_pdf'
         ]
         read_only_fields = ['date_creation']
+        
+    def validate_manuel_pdf(self, value):
+        if value and value.size > 10 * 1024 * 1024:
+            raise serializers.ValidationError("Le fichier ne doit pas dépasser 10 Mo.")
+        if value and not value.name.lower().endswith('.pdf'):
+            raise serializers.ValidationError("Seuls les fichiers PDF sont acceptés.")
+        return value

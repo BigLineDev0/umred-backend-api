@@ -4,12 +4,13 @@ from .models import Reservation
 class ReservationSerializer(serializers.ModelSerializer):
     demandeur_nom = serializers.CharField(source='demandeur.__str__', read_only=True)
     laboratoire_nom = serializers.CharField(source='laboratoire.nom', read_only=True)
+    demandeur_email = serializers.EmailField(source='demandeur.email', read_only=True)
     equipements_noms = serializers.SerializerMethodField()
 
     class Meta:
         model = Reservation
         fields = [
-            'id', 'demandeur', 'demandeur_nom', 'validateur',
+            'id', 'demandeur', 'demandeur_nom','demandeur_email', 'validateur',
             'laboratoire', 'laboratoire_nom', 'equipements', 'equipements_noms',
             'date', 'heure_debut', 'heure_fin', 'motif',
             'statut', 'est_archivee', 'date_creation', 'date_validation',
