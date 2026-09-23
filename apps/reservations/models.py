@@ -36,10 +36,14 @@ class Reservation(models.Model):
     statut = models.CharField(
         max_length=20, choices=StatutReservation.choices, default=StatutReservation.EN_ATTENTE
     )
+    projet = models.ForeignKey(
+        'projets.Projet', on_delete=models.SET_NULL, null=True, blank=True, related_name='reservations'
+    )
     est_archivee = models.BooleanField(default=False)
     date_creation = models.DateTimeField(auto_now_add=True)
     date_validation = models.DateTimeField(null=True, blank=True)
-    rappel_envoye = models.BooleanField(default=False)
+    rappel_24h_envoye = models.BooleanField(default=False)
+    rappel_1h_envoye = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = 'Réservation'
@@ -86,11 +90,6 @@ class Reservation(models.Model):
         return qs.exists()
 
     def creer(self, equipements_ids=None):
-        """
-        Applique RG2/RG3, puis assigne les équipements APRÈS la sauvegarde :
-        un ManyToMany ne peut pas être défini sur un objet qui n'a pas
-        encore de pk en base — contrainte propre aux relations M2M.
-        """
         from apps.utilisateurs.models import Role
 
         equipements_ids = equipements_ids or []
@@ -103,10 +102,18 @@ class Reservation(models.Model):
                 "Un des équipements sélectionnés est déjà réservé ou en attente sur ce créneau."
             )
 
-        self.statut = (
-            StatutReservation.EN_ATTENTE if self.demandeur.role == Role.ETUDIANT
-            else StatutReservation.VALIDEE
-        )
+        # Un équipement sensible force toujours la validation, même pour un
+        # rôle qui bénéficierait normalement d'une confirmation immédiate
+        # (RG2) — la sensibilité de la ressource prime sur le rôle demandeur.
+        equipement_sensible = Equipement.objects.filter(
+            id__in=equipements_ids, necessite_validation=True
+        ).exists()
+
+        if equipement_sensible or self.demandeur.role == Role.ETUDIANT:
+            self.statut = StatutReservation.EN_ATTENTE
+        else:
+            self.statut = StatutReservation.VALIDEE
+
         self.save()
         if equipements_ids:
             self.equipements.set(equipements_ids)

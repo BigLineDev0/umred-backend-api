@@ -3,7 +3,7 @@ from .models import Laboratoire
 
 
 class LaboratoireSerializer(serializers.ModelSerializer):
-    responsable_nom = serializers.CharField(source='responsable.__str__', read_only=True, allow_null=True)
+    responsable_nom = serializers.CharField(source='responsable.nom_complet', read_only=True, allow_null=True)
     nombre_equipements = serializers.SerializerMethodField()
     nombre_equipements_disponibles = serializers.SerializerMethodField()
 

@@ -10,7 +10,8 @@ class EquipementSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'laboratoire', 'laboratoire_nom', 'nom', 'description',
             'marque', 'modele', 'numero_serie', 'statut', 'date_creation',
-            'instructions_utilisation', 'consignes_securite', 'manuel_pdf'
+            'instructions_utilisation', 'consignes_securite', 'manuel_pdf',
+            'necessite_validation'
         ]
         read_only_fields = ['date_creation']
         

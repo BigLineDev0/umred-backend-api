@@ -1,17 +1,17 @@
-from rest_framework.decorators import action
+from rest_framework.decorators import APIView, action
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.utilisateurs.models import Role, Utilisateur
+from apps.utilisateurs.models import Role, Utilisateur, JetonDefinitionMotDePasse
 from rest_framework.exceptions import ValidationError as DRFValidationError
-from .serializers import UmredTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer, UtilisateurSerializer
+from .serializers import MonProfilUpdateSerializer, UmredTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer, UtilisateurSerializer, DefinirMotDePasseSerializer
 
 from rest_framework import generics, mixins, permissions, status
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework import viewsets
 from apps.core.services import enregistrer as journaliser
-from .services import generer_mot_de_passe, envoyer_identifiants
+from .services import envoyer_lien_definition_mdp
 
 
 class EstAdmin(permissions.BasePermission):
@@ -37,30 +37,23 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        mot_de_passe = generer_mot_de_passe()
         utilisateur = Utilisateur.objects.create_user(
             email=serializer.validated_data['email'],
-            password=mot_de_passe,
+            password=None,  # aucun mot de passe utilisable tant qu'il n'a pas cliqué le lien
             nom=serializer.validated_data['nom'],
             prenom=serializer.validated_data['prenom'],
             telephone=serializer.validated_data.get('telephone', ''),
             role=serializer.validated_data['role'],
         )
-        # Un compte créé par un admin est déjà de confiance : actif
-        # immédiatement, contrairement à l'auto-inscription étudiante.
         utilisateur.activer_compte()
 
+        jeton = JetonDefinitionMotDePasse.generer_pour(utilisateur)
         try:
-            envoyer_identifiants(utilisateur, mot_de_passe)
-        except Exception:
-            # La création du compte ne doit jamais échouer à cause d'un
-            # envoi d'email en panne (SMTP non configuré, etc.) — le compte
-            # existe déjà en base, l'admin pourra transmettre l'accès autrement.
-            pass
+            envoyer_lien_definition_mdp(utilisateur, jeton.jeton)
+        except Exception as e:
+            print(f"ERREUR ENVOI EMAIL : {e}")
 
-        journaliser(request.user, "Création d'un compte utilisateur", utilisateur,
-                    f'Rôle : {utilisateur.get_role_display()}')
-
+        journaliser(request.user, "Création d'un compte utilisateur", utilisateur, f'Rôle : {utilisateur.get_role_display()}')
         return Response(UtilisateurSerializer(utilisateur).data, status=status.HTTP_201_CREATED)
 
     def perform_update(self, serializer):
@@ -118,3 +111,76 @@ class LogoutView(generics.GenericAPIView):
             except Exception:
                 pass  # blacklist non configuré : la déconnexion reste journalisée quand même
         return Response(status=status.HTTP_205_RESET_CONTENT)
+    
+    
+
+class VerifierJetonView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, jeton):
+        try:
+            objet_jeton = JetonDefinitionMotDePasse.objects.get(jeton=jeton)
+        except JetonDefinitionMotDePasse.DoesNotExist:
+            return Response({'valide': False}, status=404)
+
+        if not objet_jeton.est_valide():
+            return Response({'valide': False}, status=400)
+
+        return Response({'valide': True, 'prenom': objet_jeton.utilisateur.prenom})
+
+
+class DefinirMotDePasseView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = DefinirMotDePasseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            objet_jeton = JetonDefinitionMotDePasse.objects.get(jeton=serializer.validated_data['jeton'])
+        except JetonDefinitionMotDePasse.DoesNotExist:
+            return Response({'detail': 'Lien invalide.'}, status=404)
+
+        if not objet_jeton.est_valide():
+            return Response({'detail': 'Ce lien a expiré ou a déjà été utilisé.'}, status=400)
+
+        utilisateur = objet_jeton.utilisateur
+        utilisateur.set_password(serializer.validated_data['password'])
+        utilisateur.save()
+
+        objet_jeton.utilise = True
+        objet_jeton.save(update_fields=['utilise'])
+
+        return Response({'detail': 'Mot de passe défini avec succès.'})
+    
+
+class MonProfilView(generics.RetrieveUpdateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
+
+    def get_serializer_class(self):
+        return MonProfilUpdateSerializer if self.request.method in ('PUT', 'PATCH') else UtilisateurSerializer
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        journaliser(self.request.user, "Modification de son profil", instance)
+
+
+class ChangerMotDePasseView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        ancien = request.data.get('ancien_password', '')
+        nouveau = request.data.get('nouveau_password', '')
+
+        if not request.user.check_password(ancien):
+            return Response({'detail': 'Le mot de passe actuel est incorrect.'}, status=400)
+        if len(nouveau) < 8:
+            return Response({'detail': 'Le nouveau mot de passe doit contenir au moins 8 caractères.'}, status=400)
+
+        request.user.set_password(nouveau)
+        request.user.save()
+        journaliser(request.user, 'Modification du mot de passe')
+        return Response({'detail': 'Mot de passe modifié avec succès.'})

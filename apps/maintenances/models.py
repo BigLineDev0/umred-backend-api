@@ -11,6 +11,7 @@ class TypeMaintenance(models.TextChoices):
 
 
 class StatutMaintenance(models.TextChoices):
+    SIGNALEE = 'SIGNALEE', 'Signalée'
     PLANIFIEE = 'PLANIFIEE', 'Planifiée'
     EN_COURS = 'EN_COURS', 'En cours'
     TERMINEE = 'TERMINEE', 'Terminée'
@@ -80,6 +81,7 @@ class Maintenance(models.Model):
             description=description,
             date_planifiee=timezone.now(),
             signale_par=signale_par,
+            statut=StatutMaintenance.SIGNALEE,  # jamais PLANIFIEE tant que personne n'a agi
         )
         maintenance.full_clean()
         maintenance.save()
@@ -88,8 +90,10 @@ class Maintenance(models.Model):
     # --- Cycle de vie ---
 
     def demarrer(self):
-        if self.statut != StatutMaintenance.PLANIFIEE:
-            raise ValidationError("Seule une maintenance planifiée peut être démarrée.")
+        if self.statut not in [StatutMaintenance.PLANIFIEE, StatutMaintenance.SIGNALEE]:
+            raise ValidationError("Seule une maintenance planifiée ou signalée peut être démarrée.")
+        if self.statut == StatutMaintenance.SIGNALEE and not self.technicien:
+            raise ValidationError("Assignez d'abord un technicien avant de démarrer.")
         self.statut = StatutMaintenance.EN_COURS
         self.date_debut = timezone.now()
         self.save(update_fields=['statut', 'date_debut'])
@@ -113,3 +117,12 @@ class Maintenance(models.Model):
         ).exclude(pk=self.pk)
         if not maintenances_actives.exists():
             self.equipement.changer_statut(StatutEquipement.DISPONIBLE)
+            
+    def prendre_en_charge(self, technicien, date_planifiee):
+        if self.statut != StatutMaintenance.SIGNALEE:
+            raise ValidationError("Seule une panne signalée peut être prise en charge.")
+        self.technicien = technicien
+        self.date_planifiee = date_planifiee
+        self.statut = StatutMaintenance.PLANIFIEE
+        self.save(update_fields=['technicien', 'date_planifiee', 'statut'])
+        return self

@@ -8,8 +8,8 @@ class MaintenanceSerializer(serializers.ModelSerializer):
     equipement_numero_serie = serializers.CharField(source='equipement.numero_serie', read_only=True)
     equipement_laboratoire_nom = serializers.CharField(source='equipement.laboratoire.nom', read_only=True)
     equipement_statut = serializers.CharField(source='equipement.statut', read_only=True)
-    technicien_nom = serializers.CharField(source='technicien.__str__', read_only=True, allow_null=True)
-    signale_par_nom = serializers.CharField(source='signale_par.__str__', read_only=True, allow_null=True)
+    technicien_nom = serializers.CharField(source='technicien.nom_complet', read_only=True, allow_null=True)
+    signale_par_nom = serializers.CharField(source='signale_par.nom_complet', read_only=True, allow_null=True)
 
     class Meta:
         model = Maintenance

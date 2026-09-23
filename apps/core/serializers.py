@@ -3,7 +3,7 @@ from .models import JournalActivite
 
 
 class JournalActiviteSerializer(serializers.ModelSerializer):
-    auteur_nom = serializers.CharField(source='auteur.__str__', read_only=True, allow_null=True)
+    auteur_nom = serializers.CharField(source='auteur.nom_complet', read_only=True, allow_null=True)
     entite_type_nom = serializers.CharField(source='entite_type.model', read_only=True, allow_null=True)
 
     class Meta:

@@ -23,6 +23,18 @@ class Equipement(models.Model):
     instructions_utilisation = models.TextField(blank=True)
     consignes_securite = models.TextField(blank=True)
     manuel_pdf = models.FileField(upload_to='manuels_equipements/', blank=True, null=True)
+    necessite_validation = models.BooleanField(
+        default=False,
+        help_text="Équipement coûteux ou sensible : toute réservation nécessite une validation, quel que soit le rôle du demandeur."
+    )
+    seuil_heures_maintenance = models.PositiveIntegerField(
+        default=200,
+        help_text="Nombre d'heures d'utilisation cumulées avant qu'une alerte de maintenance préventive soit déclenchée."
+    )
+    categorie = models.CharField(
+        max_length=100, blank=True,
+        help_text="Ex. 'Microscope', 'Centrifugeuse' — permet de suggérer un équipement équivalent en cas de conflit."
+    )
 
     class Meta:
         verbose_name = 'Équipement'
@@ -38,3 +50,45 @@ class Equipement(models.Model):
     def changer_statut(self, nouveau_statut):
         self.statut = nouveau_statut
         self.save(update_fields=['statut'])
+        
+    def heures_utilisation_depuis_derniere_maintenance(self):
+        """
+        Additionne la durée de toutes les réservations VALIDEES ou TERMINEES
+        sur cet équipement, depuis la dernière maintenance clôturée (ou
+        depuis toujours, si aucune maintenance n'a jamais eu lieu).
+        """
+        from apps.maintenances.models import StatutMaintenance
+        from apps.reservations.models import StatutReservation
+        from datetime import datetime, timedelta
+
+        derniere_maintenance = self.maintenances.filter(
+            statut=StatutMaintenance.TERMINEE
+        ).order_by('-date_fin').first()
+
+        reservations = self.reservations.filter(
+            statut__in=[StatutReservation.VALIDEE, StatutReservation.TERMINEE]
+        )
+        if derniere_maintenance and derniere_maintenance.date_fin:
+            reservations = reservations.filter(date__gte=derniere_maintenance.date_fin.date())
+
+        total = timedelta()
+        for r in reservations:
+            debut = datetime.combine(r.date, r.heure_debut)
+            fin = datetime.combine(r.date, r.heure_fin)
+            total += (fin - debut)
+
+        return round(total.total_seconds() / 3600, 1)
+    
+    def pannes_signalees_recentes(self, jours=90):
+        """
+        Le calcul de fréquence de pannes récentes
+        """
+        from apps.maintenances.models import TypeMaintenance
+        from django.utils import timezone
+        from datetime import timedelta
+
+        seuil_date = timezone.now() - timedelta(days=jours)
+        return self.maintenances.filter(
+            type=TypeMaintenance.CORRECTIVE,
+            date_creation__gte=seuil_date,
+        ).count()

@@ -7,11 +7,11 @@ from apps.core.services import enregistrer as journaliser
 
 from apps.notifications.services import notifier
 from apps.notifications.models import TypeNotification
-from apps.utilisateurs.models import Utilisateur, StatutCompte
+from apps.utilisateurs.models import Utilisateur, StatutCompte, Role
 
-from .models import Maintenance
+from .models import Maintenance, StatutMaintenance
 from .serializers import MaintenanceSerializer, SignalementPanneSerializer, ClotureMaintenanceSerializer
-from apps.utilisateurs.models import Role
+from django.db.models import Q
 
 
 class EstTechnicienOuAdmin(permissions.BasePermission):
@@ -28,24 +28,32 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         # Planifier, modifier, démarrer, clôturer, supprimer : réservé aux techniciens/admin.
         # Signaler une panne reste ouvert à tout utilisateur authentifié — cohérent
         # avec le tableau des besoins fonctionnels (Chercheur, Étudiant peuvent signaler).
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'demarrer', 'cloturer']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'demarrer', 'prendre_en_charge', 'cloturer']:
             return [EstTechnicienOuAdmin()]
         return super().get_permissions()
     
     def get_queryset(self):
-        qs = super().get_queryset()
+        user = self.request.user
         equipement_id = self.request.query_params.get('equipement')
+
+        if user.role == Role.ADMIN or equipement_id:
+            qs = Maintenance.objects.all()
+        else:
+            # Un technicien voit ses propres interventions assignées, PLUS
+            # toutes les pannes "signalées" mais pas encore prises en charge
+            # (technicien=None) — c'est la file d'attente commune que
+            # n'importe quel technicien doit pouvoir consulter et récupérer.
+            qs = Maintenance.objects.filter(Q(technicien=user) | Q(statut=StatutMaintenance.SIGNALEE))
+
         statut = self.request.query_params.get('statut')
         type_ = self.request.query_params.get('type')
         date_debut = self.request.query_params.get('date_debut')
-        
         date_fin = self.request.query_params.get('date_fin')
-        
+
         if date_debut:
             qs = qs.filter(date_planifiee__date__gte=date_debut)
         if date_fin:
             qs = qs.filter(date_planifiee__date__lte=date_fin)
-            
         if equipement_id:
             qs = qs.filter(equipement_id=equipement_id)
         if statut:
@@ -133,4 +141,19 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         # Enregistrement de logs
         journaliser(request.user, 'Annulation de maintenance', maintenance)
         
+        return Response(self.get_serializer(maintenance).data)
+    
+    @action(detail=True, methods=['post'], permission_classes=[EstTechnicienOuAdmin])
+    def prendre_en_charge(self, request, pk=None):
+        maintenance = self.get_object()
+        date_planifiee = request.data.get('date_planifiee')
+        if not date_planifiee:
+            raise DRFValidationError({'date_planifiee': "Ce champ est obligatoire."})
+
+        try:
+            maintenance.prendre_en_charge(technicien=request.user, date_planifiee=date_planifiee)
+        except DjangoValidationError as e:
+            raise DRFValidationError(str(e))
+
+        journaliser(request.user, 'Prise en charge de maintenance', maintenance)
         return Response(self.get_serializer(maintenance).data)
