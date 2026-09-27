@@ -33,4 +33,7 @@ class ProjetViewSet(viewsets.ModelViewSet):
         return qs if self.request.user.role == Role.ADMIN else qs.filter(responsable=self.request.user)
 
     def perform_create(self, serializer):
+        # Le responsable est toujours l'utilisateur connecté (jamais lu dans
+        # la requête) et la priorité reste NORMALE : seul un admin peut
+        # l'élever ensuite, car elle influe sur l'arbitrage des conflits.
         serializer.save(responsable=self.request.user)

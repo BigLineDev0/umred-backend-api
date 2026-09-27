@@ -24,6 +24,9 @@ class StatutAcademique(models.TextChoices):
     PROFESSEUR = 'PROFESSEUR', 'Professeur des universités'
 
 
+# Rang numérique utilisé pour départager deux demandes en conflit à
+# priorité de projet égale (voir ReservationViewSet._cle_priorite).
+# Plus le chiffre est grand, plus le demandeur est prioritaire.
 RANG_STATUT_ACADEMIQUE = {
     StatutAcademique.PROFESSEUR: 3,
     StatutAcademique.MAITRE_DE_CONFERENCES: 2,
@@ -31,10 +34,16 @@ RANG_STATUT_ACADEMIQUE = {
 }
 class UtilisateurManager(BaseUserManager):
 
+    # Les emails sont stockés en minuscules et recherchés sans tenir compte
+    # de la casse : « Awa@umred.sn » et « awa@umred.sn » désignent le même
+    # compte (impossible d'en créer deux, connexion possible dans les deux cas).
+    def get_by_natural_key(self, email):
+        return self.get(email__iexact=email)
+
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError("L'adresse email est obligatoire.")
-        email = self.normalize_email(email)
+        email = self.normalize_email(email).lower()
         extra_fields.setdefault('statut_compte', StatutCompte.ACTIF)
         utilisateur = self.model(email=email, **extra_fields)
         utilisateur.set_password(password)
@@ -85,25 +94,57 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     def nom_complet(self):
         return f'{self.prenom} {self.nom}'
     
+    # statut_compte est le statut métier affiché ; is_active est le drapeau
+    # que Django et simplejwt vérifient à CHAQUE requête authentifiée. Les
+    # deux sont synchronisés : désactiver un compte coupe immédiatement
+    # l'accès, même avec un token JWT encore valide.
     def activer_compte(self):
         self.statut_compte = StatutCompte.ACTIF
-        self.save(update_fields=['statut_compte'])
+        self.is_active = True
+        self.save(update_fields=['statut_compte', 'is_active'])
 
     def desactiver_compte(self):
         self.statut_compte = StatutCompte.INACTIF
-        self.save(update_fields=['statut_compte'])
+        self.is_active = False
+        self.save(update_fields=['statut_compte', 'is_active'])
+
+
+class MotifJeton(models.TextChoices):
+    INVITATION = 'INVITATION', 'Activation du compte'
+    REINITIALISATION = 'REINITIALISATION', 'Mot de passe oublié'
 
 
 class JetonDefinitionMotDePasse(models.Model):
+    """
+    Jeton envoyé par email pour choisir un mot de passe, dans deux cas :
+    l'invitation d'un compte créé par l'admin, et le « mot de passe
+    oublié ». Usage unique. secrets.token_urlsafe(32) produit 32 octets
+    aléatoires cryptographiquement sûrs (~43 caractères), impossibles à
+    deviner, et utilisables tels quels dans une URL.
+    """
+    # Durée de vie selon le motif : une invitation laisse le temps de
+    # consulter ses emails ; un lien de réinitialisation, qui donne accès à
+    # un compte existant, doit être court pour limiter le risque en cas de
+    # boîte mail compromise.
+    DUREES_VALIDITE = {
+        MotifJeton.INVITATION: timedelta(days=3),
+        MotifJeton.REINITIALISATION: timedelta(hours=1),
+    }
+
     utilisateur = models.ForeignKey(Utilisateur, on_delete=models.CASCADE, related_name='jetons_mdp')
     jeton = models.CharField(max_length=64, unique=True, db_index=True)
+    motif = models.CharField(max_length=20, choices=MotifJeton.choices, default=MotifJeton.INVITATION)
     date_creation = models.DateTimeField(auto_now_add=True)
     utilise = models.BooleanField(default=False)
 
     def est_valide(self):
-        expiration = self.date_creation + timedelta(days=3)
+        expiration = self.date_creation + self.DUREES_VALIDITE[self.motif]
         return not self.utilise and timezone.now() < expiration
 
     @classmethod
-    def generer_pour(cls, utilisateur):
-        return cls.objects.create(utilisateur=utilisateur, jeton=secrets.token_urlsafe(32))
+    def generer_pour(cls, utilisateur, motif=MotifJeton.INVITATION):
+        # Un seul lien actif à la fois : générer un nouveau jeton invalide
+        # les précédents (ex. si l'utilisateur clique deux fois sur
+        # « mot de passe oublié », seul le dernier email fonctionne).
+        cls.objects.filter(utilisateur=utilisateur, utilise=False).update(utilise=True)
+        return cls.objects.create(utilisateur=utilisateur, jeton=secrets.token_urlsafe(32), motif=motif)

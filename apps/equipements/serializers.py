@@ -9,9 +9,9 @@ class EquipementSerializer(serializers.ModelSerializer):
         model = Equipement
         fields = [
             'id', 'laboratoire', 'laboratoire_nom', 'nom', 'description',
-            'marque', 'modele', 'numero_serie', 'statut', 'date_creation',
+            'marque', 'modele', 'numero_serie', 'date_acquisition', 'statut', 'date_creation',
             'instructions_utilisation', 'consignes_securite', 'manuel_pdf',
-            'necessite_validation'
+            'necessite_validation', 'seuil_heures_maintenance', 'categorie'
         ]
         read_only_fields = ['date_creation']
         
@@ -20,4 +20,11 @@ class EquipementSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Le fichier ne doit pas dépasser 10 Mo.")
         if value and not value.name.lower().endswith('.pdf'):
             raise serializers.ValidationError("Seuls les fichiers PDF sont acceptés.")
+        # L'extension se renomme facilement : on vérifie aussi la « signature »
+        # du fichier. Tout vrai PDF commence par les octets « %PDF- ».
+        if value:
+            debut = value.read(5)
+            value.seek(0)
+            if debut != b'%PDF-':
+                raise serializers.ValidationError("Le fichier n'est pas un PDF valide.")
         return value

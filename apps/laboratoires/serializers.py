@@ -16,8 +16,14 @@ class LaboratoireSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['date_creation']
 
+    # Valeurs pré-calculées par l'annotate() de LaboratoireViewSet quand
+    # elles existent ; sinon (objet chargé ailleurs) on compte directement.
     def get_nombre_equipements(self, obj):
+        if hasattr(obj, 'nb_equipements'):
+            return obj.nb_equipements
         return obj.equipements.count()
 
     def get_nombre_equipements_disponibles(self, obj):
+        if hasattr(obj, 'nb_equipements_disponibles'):
+            return obj.nb_equipements_disponibles
         return obj.equipements.filter(statut='DISPONIBLE').count()

@@ -1,8 +1,4 @@
-from datetime import time
-from .models import Reservation, StatutReservation
-
-HEURE_OUVERTURE = time(8, 0)
-HEURE_FERMETURE = time(18, 0)
+from .models import Reservation, StatutReservation, HEURE_OUVERTURE, HEURE_FERMETURE
 
 
 def creneaux_libres_jour(equipement_id, jour):
@@ -17,6 +13,11 @@ def creneaux_libres_jour(equipement_id, jour):
         statut__in=[StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE],
     ).order_by('heure_debut')
 
+    # Algorithme de balayage : les réservations étant triées par heure de
+    # début, un curseur avance de l'ouverture vers la fermeture. Chaque
+    # « trou » entre le curseur et le début de la réservation suivante est
+    # une plage libre. max() gère les réservations qui se chevauchent ou
+    # qui sont incluses dans une précédente (le curseur ne recule jamais).
     curseur = HEURE_OUVERTURE
     libres = []
     for r in reservations:

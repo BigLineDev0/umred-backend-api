@@ -60,6 +60,8 @@ class Equipement(models.Model):
         from apps.maintenances.models import StatutMaintenance
         from apps.reservations.models import StatutReservation
         from datetime import datetime, timedelta
+        from django.db.models import Q
+        from django.utils import timezone
 
         derniere_maintenance = self.maintenances.filter(
             statut=StatutMaintenance.TERMINEE
@@ -70,6 +72,13 @@ class Equipement(models.Model):
         )
         if derniere_maintenance and derniere_maintenance.date_fin:
             reservations = reservations.filter(date__gte=derniere_maintenance.date_fin.date())
+
+        # Seules les réservations déjà terminées comptent : une réservation
+        # validée pour la semaine prochaine n'a pas encore usé l'équipement.
+        maintenant = timezone.localtime()
+        reservations = reservations.filter(
+            Q(date__lt=maintenant.date()) | Q(date=maintenant.date(), heure_fin__lte=maintenant.time())
+        )
 
         total = timedelta()
         for r in reservations:

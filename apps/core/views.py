@@ -17,7 +17,7 @@ from apps.reservations.models import Reservation
 from apps.laboratoires.models import Laboratoire
 
 from datetime import datetime
-from apps.utilisateurs.models import Role
+from .utils import lire_date, lire_id
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill
@@ -48,12 +48,13 @@ class JournalActiviteViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        auteur_id = self.request.query_params.get('auteur')
+        qs = qs.select_related('auteur', 'entite_type')
+        auteur_id = lire_id(self.request, 'auteur')
         action = self.request.query_params.get('action')
         entite = self.request.query_params.get('entite')
         search = self.request.query_params.get('search')
-        date_debut = self.request.query_params.get('date_debut')
-        date_fin = self.request.query_params.get('date_fin')
+        date_debut = lire_date(self.request, 'date_debut')
+        date_fin = lire_date(self.request, 'date_fin')
 
         if auteur_id:
             qs = qs.filter(auteur_id=auteur_id)
@@ -77,7 +78,7 @@ def recherche_globale(request):
     if len(terme) < 2:
         return Response({'equipements': [], 'laboratoires': []})
 
-    equipements = Equipement.objects.filter(nom__icontains=terme)[:5]
+    equipements = Equipement.objects.filter(nom__icontains=terme).select_related('laboratoire')[:5]
     laboratoires = Laboratoire.objects.filter(nom__icontains=terme)[:5]
 
     return Response({
@@ -88,8 +89,27 @@ def recherche_globale(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def mon_activite(request):
-    entrees = JournalActivite.objects.filter(auteur=request.user).order_by('-date_heure')[:10]
+    entrees = JournalActivite.objects.filter(auteur=request.user).select_related('auteur', 'entite_type').order_by('-date_heure')[:10]
     return Response(JournalActiviteSerializer(entrees, many=True).data)
+
+
+# Un tableur interprète comme une formule toute cellule commençant par
+# l'un de ces caractères. Un utilisateur qui mettrait « =HYPERLINK(...) »
+# dans son nom ferait exécuter cette formule chez l'admin qui ouvre le
+# rapport (injection de formule / CSV injection).
+CARACTERES_FORMULE = ('=', '+', '-', '@', '\t', '\r')
+
+
+def _cellule_sure(valeur):
+    # L'apostrophe initiale force le tableur à traiter la cellule comme du
+    # texte. Les nombres ne sont pas touchés (ils restent calculables).
+    if isinstance(valeur, str) and valeur.startswith(CARACTERES_FORMULE):
+        return "'" + valeur
+    return valeur
+
+
+def _ajouter_ligne(ws, valeurs):
+    ws.append([_cellule_sure(v) for v in valeurs])
 
 
 def _duree_heures(reservation):
@@ -107,9 +127,9 @@ def rapports_export_excel(request):
     if request.user.role != Role.ADMIN:
         return Response({'detail': "Seul un administrateur peut exporter ce rapport."}, status=403)
 
-    date_debut = request.query_params.get('date_debut')
-    date_fin = request.query_params.get('date_fin')
-    laboratoire_id = request.query_params.get('laboratoire')
+    date_debut = lire_date(request, 'date_debut')
+    date_fin = lire_date(request, 'date_fin')
+    laboratoire_id = lire_id(request, 'laboratoire')
 
     reservations = Reservation.objects.exclude(est_archivee=True)
     if date_debut:
@@ -119,7 +139,7 @@ def rapports_export_excel(request):
     if laboratoire_id:
         reservations = reservations.filter(laboratoire_id=laboratoire_id)
 
-    reservations = list(reservations.select_related('laboratoire', 'demandeur').prefetch_related('equipements'))
+    reservations = list(reservations.select_related('laboratoire', 'demandeur').prefetch_related('equipements__laboratoire'))
 
     wb = openpyxl.Workbook()
     entete_font = Font(bold=True, color="FFFFFF")
@@ -133,26 +153,26 @@ def rapports_export_excel(request):
     # --- Résumé ---
     ws = wb.active
     ws.title = "Résumé"
-    ws.append(["Rapport d'activité — UMRED Labo"])
+    _ajouter_ligne(ws, ["Rapport d'activité — UMRED Labo"])
     ws['A1'].font = Font(bold=True, size=14)
-    ws.append([f"Période : {date_debut or '—'} au {date_fin or '—'}"])
+    _ajouter_ligne(ws, [f"Période : {date_debut or '—'} au {date_fin or '—'}"])
     if laboratoire_id:
         labo = Laboratoire.objects.filter(id=laboratoire_id).first()
-        ws.append([f"Laboratoire : {labo.nom if labo else '—'}"])
-    ws.append([])
-    ws.append(["Indicateur", "Valeur"])
+        _ajouter_ligne(ws, [f"Laboratoire : {labo.nom if labo else '—'}"])
+    _ajouter_ligne(ws, [])
+    _ajouter_ligne(ws, ["Indicateur", "Valeur"])
     style_entete(ws)
 
     equipements_utilises = {e.id for r in reservations for e in r.equipements.all()}
-    ws.append(["Réservations sur la période", len(reservations)])
-    ws.append(["Équipements utilisés", len(equipements_utilises)])
-    ws.append(["Heures d'utilisation cumulées", round(sum(_duree_heures(r) for r in reservations), 1)])
+    _ajouter_ligne(ws, ["Réservations sur la période", len(reservations)])
+    _ajouter_ligne(ws, ["Équipements utilisés", len(equipements_utilises)])
+    _ajouter_ligne(ws, ["Heures d'utilisation cumulées", round(sum(_duree_heures(r) for r in reservations), 1)])
     ws.column_dimensions['A'].width = 32
     ws.column_dimensions['B'].width = 18
 
     # --- Par laboratoire ---
     ws2 = wb.create_sheet("Par laboratoire")
-    ws2.append(["Laboratoire", "Réservations", "Heures cumulées"])
+    _ajouter_ligne(ws2, ["Laboratoire", "Réservations", "Heures cumulées"])
     style_entete(ws2)
     par_labo = {}
     for r in reservations:
@@ -160,12 +180,12 @@ def rapports_export_excel(request):
         d['n'] += 1
         d['h'] += _duree_heures(r)
     for nom, d in sorted(par_labo.items(), key=lambda x: -x[1]['n']):
-        ws2.append([nom, d['n'], round(d['h'], 1)])
+        _ajouter_ligne(ws2, [nom, d['n'], round(d['h'], 1)])
     ws2.column_dimensions['A'].width = 34
 
     # --- Par équipement ---
     ws3 = wb.create_sheet("Par équipement")
-    ws3.append(["Équipement", "Laboratoire", "Réservations", "Heures cumulées"])
+    _ajouter_ligne(ws3, ["Équipement", "Laboratoire", "Réservations", "Heures cumulées"])
     style_entete(ws3)
     par_equip = {}
     for r in reservations:
@@ -174,29 +194,29 @@ def rapports_export_excel(request):
             d['n'] += 1
             d['h'] += _duree_heures(r)
     for (nom, labo_nom), d in sorted(par_equip.items(), key=lambda x: -x[1]['n']):
-        ws3.append([nom, labo_nom, d['n'], round(d['h'], 1)])
+        _ajouter_ligne(ws3, [nom, labo_nom, d['n'], round(d['h'], 1)])
     ws3.column_dimensions['A'].width = 30
     ws3.column_dimensions['B'].width = 30
 
     # --- Par type d'utilisateur ---
     ws4 = wb.create_sheet("Par type d'utilisateur")
-    ws4.append(["Rôle", "Réservations"])
+    _ajouter_ligne(ws4, ["Rôle", "Réservations"])
     style_entete(ws4)
     par_role = {}
     for r in reservations:
         label = ROLE_LABELS.get(r.demandeur.role, r.demandeur.role)
         par_role[label] = par_role.get(label, 0) + 1
     for label, n in sorted(par_role.items(), key=lambda x: -x[1]):
-        ws4.append([label, n])
+        _ajouter_ligne(ws4, [label, n])
     ws4.column_dimensions['A'].width = 26
 
     # --- Détail ---
     ws5 = wb.create_sheet("Détail des réservations")
-    ws5.append(["Date", "Début", "Fin", "Laboratoire", "Équipement(s)", "Demandeur", "Rôle", "Statut"])
+    _ajouter_ligne(ws5, ["Date", "Début", "Fin", "Laboratoire", "Équipement(s)", "Demandeur", "Rôle", "Statut"])
     style_entete(ws5)
     for r in sorted(reservations, key=lambda x: x.date):
         equip = ", ".join(e.nom for e in r.equipements.all()) or "Salle uniquement"
-        ws5.append([
+        _ajouter_ligne(ws5, [
             r.date.strftime('%d/%m/%Y'), str(r.heure_debut)[:5], str(r.heure_fin)[:5],
             r.laboratoire.nom, equip, r.demandeur.nom_complet,
             ROLE_LABELS.get(r.demandeur.role, r.demandeur.role), r.get_statut_display(),

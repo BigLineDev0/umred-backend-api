@@ -6,7 +6,9 @@ services:
       POSTGRES_USER: umred
       POSTGRES_PASSWORD: umred
     ports:
-      - "5432:5432"
+      # 127.0.0.1 : la base n'est joignable que depuis cette machine, pas
+      # depuis le réseau (les identifiants ci-dessous sont ceux de dev).
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

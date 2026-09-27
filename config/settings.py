@@ -7,11 +7,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env()
 environ.Env.read_env(BASE_DIR / '.env')
 
-SECRET_KEY = env('SECRET_KEY', default='django-insecure-a-changer-en-production')
+# Valeurs par défaut sûres : sans .env, le serveur refuse de démarrer
+# (pas de SECRET_KEY) et tourne hors mode debug. Le mode debug et les hôtes
+# autorisés doivent être activés explicitement dans le .env.
+SECRET_KEY = env('SECRET_KEY')
 
-DEBUG = env.bool('DEBUG', default=True)
+DEBUG = env.bool('DEBUG', default=False)
 
-ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['*'])
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -115,6 +118,17 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Anti brute-force : les requêtes anonymes sont limitées globalement,
+    # et les vues d'authentification (throttle_scope = 'auth') plus
+    # strictement encore. Compteurs par IP (anonyme) ou par utilisateur.
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/min',
+        'auth': '10/min',
+    },
 }
 
 SPECTACULAR_SETTINGS = {
@@ -148,6 +162,9 @@ EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='UMRED Labo <no-reply@umred.sn>')
 
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:4200')
+
+# Webhook n8n qui envoie les emails de réservation. Vide = envoi désactivé.
+N8N_WEBHOOK_URL = env('N8N_WEBHOOK_URL', default='http://localhost:5678/webhook-test/umred-notification-reservation')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'

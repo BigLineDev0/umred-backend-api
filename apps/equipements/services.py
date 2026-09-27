@@ -18,6 +18,11 @@ def evaluer_usure(equipement) -> AlerteUsure | None:
     l'historique de pannes) serait l'évolution naturelle si assez de
     données étaient accumulées sur plusieurs années d'usage réel.
     """
+    # Règles évaluées de la plus grave à la moins grave ; la première qui
+    # s'applique l'emporte :
+    #   critique  : >= 2 pannes en 90 jours, OU heures >= 100 % du seuil
+    #   attention : heures >= 80 % du seuil, OU 1 panne récente
+    #   sinon     : pas d'alerte (None)
     heures = equipement.heures_utilisation_depuis_derniere_maintenance()
     seuil = equipement.seuil_heures_maintenance
     pannes = equipement.pannes_signalees_recentes()

@@ -7,6 +7,7 @@ from .serializers import EquipementSerializer
 from apps.utilisateurs.models import Role
 from rest_framework.response import Response
 from apps.core.services import enregistrer as journaliser
+from apps.core.utils import lire_id, SuppressionImpossible
 
 
 class EstTechnicienOuAdmin(permissions.BasePermission):
@@ -27,18 +28,14 @@ class EquipementViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        laboratoire_id = self.request.query_params.get('laboratoire')
+        qs = super().get_queryset().select_related('laboratoire')
+        laboratoire_id = lire_id(self.request, 'laboratoire')
         statut = self.request.query_params.get('statut')
         
         if laboratoire_id:
             qs = qs.filter(laboratoire_id=laboratoire_id)
         if statut:
             qs = qs.filter(statut=statut)
-            
-        equipement_id = self.request.query_params.get('equipement')
-        if equipement_id:
-            qs = qs.filter(equipement_id=equipement_id)
         return qs
 
     def perform_create(self, serializer):
@@ -50,6 +47,13 @@ class EquipementViewSet(viewsets.ModelViewSet):
         journaliser(self.request.user, "Modification d'équipement", instance)
 
     def perform_destroy(self, instance):
+        # on_delete=CASCADE effacerait aussi les maintenances de
+        # l'équipement : on refuse dès qu'il a un historique.
+        if instance.reservations.exists() or instance.maintenances.exists():
+            raise SuppressionImpossible(
+                "Cet équipement a un historique de réservations ou de maintenances : "
+                "passez-le plutôt au statut « Hors service »."
+            )
         journaliser(self.request.user, "Suppression d'équipement",
                     description=f'Équipement supprimé : {instance.nom}')
         instance.delete()
@@ -78,7 +82,7 @@ class EquipementViewSet(viewsets.ModelViewSet):
         équipements ayant au moins une alerte active, triés par sévérité.
         """
         resultats = []
-        for e in Equipement.objects.exclude(statut='HORS_SERVICE'):
+        for e in Equipement.objects.exclude(statut='HORS_SERVICE').select_related('laboratoire'):
             alerte = evaluer_usure(e)
             if alerte:
                 resultats.append({

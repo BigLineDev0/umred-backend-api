@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from apps.equipements.models import Equipement, StatutEquipement
@@ -18,7 +18,33 @@ class StatutMaintenance(models.TextChoices):
     ANNULEE = 'ANNULEE', 'Annulée'
 
 
+# Une maintenance dans l'un de ces états immobilise encore l'équipement.
+STATUTS_ACTIFS = [StatutMaintenance.SIGNALEE, StatutMaintenance.PLANIFIEE, StatutMaintenance.EN_COURS]
+
+
 class Maintenance(models.Model):
+    """
+    Cycle de vie (machine à états) :
+
+      Panne signalée :   SIGNALEE --prendre_en_charge--> PLANIFIEE
+      Préventive :       (création) ------------------> PLANIFIEE
+      PLANIFIEE --demarrer--> EN_COURS --cloturer--> TERMINEE
+      (SIGNALEE peut aussi être démarrée directement si un technicien est assigné)
+      Tout état actif --annuler--> ANNULEE
+
+    Le statut de l'équipement suit la maintenance : EN_PANNE au
+    signalement, EN_MAINTENANCE à la planification, DISPONIBLE à la
+    clôture. Chaque transition vérifie l'état de départ et lève une
+    ValidationError si elle n'est pas autorisée.
+
+    Un équipement peut avoir plusieurs maintenances actives en même temps
+    (ex. une panne signalée pendant qu'une préventive est planifiée) : son
+    statut est donc toujours RECALCULÉ à partir de l'ensemble de ses
+    maintenances actives (voir _recalculer_statut_equipement), jamais
+    simplement remis à DISPONIBLE à la fin de l'une d'elles.
+    Chaque opération est atomique : la maintenance et le statut de
+    l'équipement sont enregistrés ensemble, ou pas du tout.
+    """
     equipement = models.ForeignKey(
         Equipement, on_delete=models.CASCADE, related_name='maintenances'
     )
@@ -53,19 +79,42 @@ class Maintenance(models.Model):
         if self.date_debut and self.date_fin and self.date_fin <= self.date_debut:
             raise ValidationError("La date de fin doit être postérieure à la date de début.")
 
+    def _recalculer_statut_equipement(self):
+        """
+        Priorité : une panne (maintenance corrective active) l'emporte sur
+        une maintenance préventive ; sans maintenance active, l'équipement
+        redevient disponible. Un équipement HORS_SERVICE (retiré du parc
+        par décision humaine) n'est jamais modifié automatiquement.
+        """
+        equipement = self.equipement
+        if equipement.statut == StatutEquipement.HORS_SERVICE:
+            return
+        actives = equipement.maintenances.filter(statut__in=STATUTS_ACTIFS)
+        if actives.filter(type=TypeMaintenance.CORRECTIVE).exists():
+            nouveau = StatutEquipement.EN_PANNE
+        elif actives.exists():
+            nouveau = StatutEquipement.EN_MAINTENANCE
+        else:
+            nouveau = StatutEquipement.DISPONIBLE
+        if equipement.statut != nouveau:
+            equipement.changer_statut(nouveau)
+
     # --- Création ---
 
     def planifier(self):
         """
-        Planifie une maintenance préventive et bascule l'équipement en
-        EN_MAINTENANCE, pour qu'il ne soit plus réservable entre-temps.
+        Planifie une maintenance et immobilise l'équipement dès maintenant
+        (EN_MAINTENANCE, ou EN_PANNE s'il a aussi une panne en cours) : choix
+        prudent pour qu'aucune réservation ne soit acceptée sur un créneau
+        où le technicien interviendra.
         """
         self.full_clean()
-        self.statut = StatutMaintenance.PLANIFIEE
-        self.save()
-        self.equipement.changer_statut(StatutEquipement.EN_MAINTENANCE)
+        with transaction.atomic():
+            self.statut = StatutMaintenance.PLANIFIEE
+            self.save()
+            self._recalculer_statut_equipement()
         return self
-    
+
 
     @classmethod
     def creer_depuis_signalement(cls, equipement, description, signale_par=None):
@@ -74,7 +123,8 @@ class Maintenance(models.Model):
         crée automatiquement une intervention corrective et bascule
         l'équipement en EN_PANNE.
         """
-        equipement.changer_statut(StatutEquipement.EN_PANNE)
+        if equipement.statut == StatutEquipement.HORS_SERVICE:
+            raise ValidationError("Cet équipement est hors service : aucune panne ne peut y être signalée.")
         maintenance = cls(
             equipement=equipement,
             type=TypeMaintenance.CORRECTIVE,
@@ -83,8 +133,12 @@ class Maintenance(models.Model):
             signale_par=signale_par,
             statut=StatutMaintenance.SIGNALEE,  # jamais PLANIFIEE tant que personne n'a agi
         )
+        # Validation AVANT toute écriture, puis maintenance + statut de
+        # l'équipement enregistrés dans la même transaction.
         maintenance.full_clean()
-        maintenance.save()
+        with transaction.atomic():
+            maintenance.save()
+            maintenance._recalculer_statut_equipement()
         return maintenance
 
     # --- Cycle de vie ---
@@ -101,23 +155,26 @@ class Maintenance(models.Model):
     def cloturer(self, rapport):
         if self.statut not in [StatutMaintenance.PLANIFIEE, StatutMaintenance.EN_COURS]:
             raise ValidationError("Cette maintenance ne peut plus être clôturée.")
-        self.statut = StatutMaintenance.TERMINEE
-        self.rapport = rapport
-        self.date_fin = timezone.now()
-        self.save(update_fields=['statut', 'rapport', 'date_fin'])
-        self.equipement.changer_statut(StatutEquipement.DISPONIBLE)
-        # TODO : notifier l'utilisateur qui avait signalé la panne, si applicable.
+        with transaction.atomic():
+            self.statut = StatutMaintenance.TERMINEE
+            self.rapport = rapport
+            self.date_fin = timezone.now()
+            self.save(update_fields=['statut', 'rapport', 'date_fin'])
+            self._recalculer_statut_equipement()
+        # La notification de celui qui a signalé la panne est faite dans la
+        # vue (MaintenanceViewSet.cloturer). date_fin sert aussi de point de
+        # départ au compteur d'heures d'usure de l'équipement.
 
     def annuler(self):
-        self.statut = StatutMaintenance.ANNULEE
-        self.save(update_fields=['statut'])
-        # On ne libère l'équipement que s'il n'a pas d'autre intervention active.
-        maintenances_actives = self.equipement.maintenances.filter(
-            statut__in=[StatutMaintenance.PLANIFIEE, StatutMaintenance.EN_COURS]
-        ).exclude(pk=self.pk)
-        if not maintenances_actives.exists():
-            self.equipement.changer_statut(StatutEquipement.DISPONIBLE)
-            
+        # Une maintenance terminée ou déjà annulée fait partie de
+        # l'historique de l'équipement : on ne la réécrit pas.
+        if self.statut in [StatutMaintenance.TERMINEE, StatutMaintenance.ANNULEE]:
+            raise ValidationError("Cette maintenance est déjà terminée ou annulée.")
+        with transaction.atomic():
+            self.statut = StatutMaintenance.ANNULEE
+            self.save(update_fields=['statut'])
+            self._recalculer_statut_equipement()
+
     def prendre_en_charge(self, technicien, date_planifiee):
         if self.statut != StatutMaintenance.SIGNALEE:
             raise ValidationError("Seule une panne signalée peut être prise en charge.")

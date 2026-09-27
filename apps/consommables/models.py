@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from apps.laboratoires.models import Laboratoire
@@ -62,27 +62,61 @@ class Consommable(models.Model):
         jours_restants = (self.date_peremption - timezone.now().date()).days
         return 0 <= jours_restants <= 15
 
+    # Le stock n'est jamais modifié « en silence » : chaque retrait ou
+    # réapprovisionnement crée une ligne MouvementStock (qui, quand,
+    # combien, pourquoi). quantite_stock est la valeur courante,
+    # MouvementStock en est l'historique traçable.
+
     def retirer_stock(self, quantite, utilisateur, motif=''):
         if quantite <= 0:
             raise ValidationError("La quantité doit être positive.")
-        if quantite > self.quantite_stock:
-            raise ValidationError(f"Stock insuffisant : {self.quantite_stock} {self.get_unite_display()} disponible(s).")
-        self.quantite_stock -= quantite
-        self.save(update_fields=['quantite_stock'])
-        MouvementStock.objects.create(
-            consommable=self, type=TypeMouvement.UTILISATION,
-            quantite=quantite, utilisateur=utilisateur, motif=motif,
-        )
+        # Verrou sur la ligne + relecture de la quantité en base : deux
+        # retraits simultanés s'exécutent l'un après l'autre, le second voit
+        # le stock déjà diminué (pas de mise à jour perdue ni de stock
+        # négatif). La transaction garantit aussi que stock et mouvement
+        # sont enregistrés ensemble, ou pas du tout.
+        with transaction.atomic():
+            self.quantite_stock = Consommable.objects.select_for_update().get(pk=self.pk).quantite_stock
+            if quantite > self.quantite_stock:
+                raise ValidationError(f"Stock insuffisant : {self.quantite_stock} {self.get_unite_display()} disponible(s).")
+            self.quantite_stock -= quantite
+            self.save(update_fields=['quantite_stock'])
+            MouvementStock.objects.create(
+                consommable=self, type=TypeMouvement.UTILISATION,
+                quantite=quantite, utilisateur=utilisateur, motif=motif,
+            )
 
     def reapprovisionner(self, quantite, utilisateur, motif=''):
         if quantite <= 0:
             raise ValidationError("La quantité doit être positive.")
-        self.quantite_stock += quantite
-        self.save(update_fields=['quantite_stock'])
-        MouvementStock.objects.create(
-            consommable=self, type=TypeMouvement.REAPPROVISIONNEMENT,
-            quantite=quantite, utilisateur=utilisateur, motif=motif,
-        )
+        with transaction.atomic():
+            self.quantite_stock = Consommable.objects.select_for_update().get(pk=self.pk).quantite_stock
+            self.quantite_stock += quantite
+            self.save(update_fields=['quantite_stock'])
+            MouvementStock.objects.create(
+                consommable=self, type=TypeMouvement.REAPPROVISIONNEMENT,
+                quantite=quantite, utilisateur=utilisateur, motif=motif,
+            )
+
+    def ajuster_stock(self, nouvelle_quantite, utilisateur, motif="Correction d'inventaire"):
+        """
+        Correction manuelle (inventaire physique, erreur de saisie) : la
+        quantité est fixée directement, et l'écart est tracé comme un
+        mouvement AJUSTEMENT (positif ou négatif).
+        """
+        if nouvelle_quantite < 0:
+            raise ValidationError("Le stock ne peut pas être négatif.")
+        with transaction.atomic():
+            ancienne = Consommable.objects.select_for_update().get(pk=self.pk).quantite_stock
+            ecart = nouvelle_quantite - ancienne
+            self.quantite_stock = nouvelle_quantite
+            if ecart == 0:
+                return
+            self.save(update_fields=['quantite_stock'])
+            MouvementStock.objects.create(
+                consommable=self, type=TypeMouvement.AJUSTEMENT,
+                quantite=ecart, utilisateur=utilisateur, motif=motif,
+            )
 
 
 class MouvementStock(models.Model):

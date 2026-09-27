@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from .models import Consommable, MouvementStock
 
@@ -28,10 +30,10 @@ class MouvementStockSerializer(serializers.ModelSerializer):
 
 
 class RetirerStockSerializer(serializers.Serializer):
-    quantite = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0.01)
+    quantite = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
     motif = serializers.CharField(required=False, allow_blank=True)
 
 
 class ReapprovisionnerSerializer(serializers.Serializer):
-    quantite = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0.01)
+    quantite = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
     motif = serializers.CharField(required=False, allow_blank=True)

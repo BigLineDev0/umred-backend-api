@@ -4,6 +4,8 @@ from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from apps.core.services import enregistrer as journaliser
+from apps.core.utils import lire_date, lire_id
+from rest_framework import serializers
 
 from apps.notifications.services import notifier
 from apps.notifications.models import TypeNotification
@@ -28,13 +30,13 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         # Planifier, modifier, démarrer, clôturer, supprimer : réservé aux techniciens/admin.
         # Signaler une panne reste ouvert à tout utilisateur authentifié — cohérent
         # avec le tableau des besoins fonctionnels (Chercheur, Étudiant peuvent signaler).
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'demarrer', 'prendre_en_charge', 'cloturer']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'demarrer', 'prendre_en_charge', 'cloturer', 'annuler']:
             return [EstTechnicienOuAdmin()]
         return super().get_permissions()
     
     def get_queryset(self):
         user = self.request.user
-        equipement_id = self.request.query_params.get('equipement')
+        equipement_id = lire_id(self.request, 'equipement')
 
         if user.role == Role.ADMIN or equipement_id:
             qs = Maintenance.objects.all()
@@ -47,8 +49,8 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
 
         statut = self.request.query_params.get('statut')
         type_ = self.request.query_params.get('type')
-        date_debut = self.request.query_params.get('date_debut')
-        date_fin = self.request.query_params.get('date_fin')
+        date_debut = lire_date(self.request, 'date_debut')
+        date_fin = lire_date(self.request, 'date_fin')
 
         if date_debut:
             qs = qs.filter(date_planifiee__date__gte=date_debut)
@@ -60,7 +62,7 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
             qs = qs.filter(statut=statut)
         if type_:
             qs = qs.filter(type=type_)
-        return qs
+        return qs.select_related('equipement__laboratoire', 'technicien', 'signale_par')
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -69,7 +71,7 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         try:
             maintenance.planifier()
         except DjangoValidationError as e:
-            raise DRFValidationError(e.messages if hasattr(e, 'messages') else str(e))
+            raise DRFValidationError(e.messages)
         
         # Enregistrement de logs
         journaliser(request.user, 'Planification de maintenance', maintenance)
@@ -80,11 +82,14 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
     def signaler_panne(self, request):
         serializer = SignalementPanneSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        maintenance = Maintenance.creer_depuis_signalement(
-            equipement=serializer.validated_data['equipement'],
-            description=serializer.validated_data['description'],
-            signale_par=request.user,
-        )
+        try:
+            maintenance = Maintenance.creer_depuis_signalement(
+                equipement=serializer.validated_data['equipement'],
+                description=serializer.validated_data['description'],
+                signale_par=request.user,
+            )
+        except DjangoValidationError as e:
+            raise DRFValidationError(e.messages)
         
         # Enregistrement de logs
         journaliser(request.user, 'Signalement de panne', maintenance)
@@ -104,7 +109,7 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         try:
             maintenance.demarrer()
         except DjangoValidationError as e:
-            raise DRFValidationError(str(e))
+            raise DRFValidationError(e.messages)
         
         # Enregistement de logs
         journaliser(request.user, 'Démarrage de maintenance', maintenance)
@@ -119,7 +124,7 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         try:
             maintenance.cloturer(rapport=serializer.validated_data['rapport'])
         except DjangoValidationError as e:
-            raise DRFValidationError(str(e))
+            raise DRFValidationError(e.messages)
         
         # Enregistrement logs
         journaliser(request.user, 'Clôture de maintenance', maintenance,
@@ -136,8 +141,11 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
         maintenance = self.get_object()
-        maintenance.annuler()
-        
+        try:
+            maintenance.annuler()
+        except DjangoValidationError as e:
+            raise DRFValidationError(e.messages)
+
         # Enregistrement de logs
         journaliser(request.user, 'Annulation de maintenance', maintenance)
         
@@ -146,14 +154,20 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[EstTechnicienOuAdmin])
     def prendre_en_charge(self, request, pk=None):
         maintenance = self.get_object()
-        date_planifiee = request.data.get('date_planifiee')
-        if not date_planifiee:
+        # DateTimeField DRF : vérifie le format et renvoie un datetime avec
+        # fuseau horaire (au lieu de passer la chaîne brute au modèle).
+        champ = serializers.DateTimeField()
+        if not request.data.get('date_planifiee'):
             raise DRFValidationError({'date_planifiee': "Ce champ est obligatoire."})
+        try:
+            date_planifiee = champ.to_internal_value(request.data['date_planifiee'])
+        except serializers.ValidationError as e:
+            raise DRFValidationError({'date_planifiee': e.detail})
 
         try:
             maintenance.prendre_en_charge(technicien=request.user, date_planifiee=date_planifiee)
         except DjangoValidationError as e:
-            raise DRFValidationError(str(e))
+            raise DRFValidationError(e.messages)
 
         journaliser(request.user, 'Prise en charge de maintenance', maintenance)
         return Response(self.get_serializer(maintenance).data)
