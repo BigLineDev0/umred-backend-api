@@ -10,6 +10,7 @@ from apps.core.services import enregistrer as journaliser
 from apps.core.utils import lire_id
 from apps.notifications.services import notifier
 from apps.notifications.models import TypeNotification
+from apps.organisations.isolation import filtrer_par_organisation
 from apps.utilisateurs.models import Utilisateur, StatutCompte, Role
 
 from .models import Consommable, MouvementStock, TypeMouvement
@@ -38,7 +39,8 @@ class ConsommableViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related('laboratoire')
+        qs = filtrer_par_organisation(super().get_queryset(), self.request.user, 'laboratoire__organisation')
+        qs = qs.select_related('laboratoire')
         laboratoire_id = lire_id(self.request, 'laboratoire')
         statut = self.request.query_params.get('statut')
         if laboratoire_id:
@@ -136,7 +138,8 @@ class ConsommableViewSet(viewsets.ModelViewSet):
         globale, triée par urgence, pour un futur affichage dashboard.
         """
         resultats = []
-        for c in Consommable.objects.select_related('laboratoire'):
+        consommables = filtrer_par_organisation(Consommable.objects.all(), request.user, 'laboratoire__organisation')
+        for c in consommables.select_related('laboratoire'):
             if c.statut in ['STOCK_FAIBLE', 'EPUISE'] or c.peremption_proche or c.statut == 'PERIME':
                 resultats.append({
                     'consommable_id': c.id, 'nom': c.nom,
@@ -154,7 +157,10 @@ class ConsommableViewSet(viewsets.ModelViewSet):
         # les techniciens recevraient une notification à chaque utilisation.
         if consommable.statut not in ['STOCK_FAIBLE', 'EPUISE'] or consommable.statut == statut_avant:
             return
-        techniciens = Utilisateur.objects.filter(role=Role.TECHNICIEN, statut_compte=StatutCompte.ACTIF)
+        techniciens = Utilisateur.objects.filter(
+            role=Role.TECHNICIEN, statut_compte=StatutCompte.ACTIF,
+            organisation_id=consommable.laboratoire.organisation_id,
+        )
         libelle = 'épuisé' if consommable.statut == 'EPUISE' else 'stock faible'
         for technicien in techniciens:
             notifier(technicien, f'Alerte stock : {consommable.nom}',

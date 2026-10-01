@@ -7,6 +7,9 @@ from django.utils import timezone
 
 
 class Role(models.TextChoices):
+    # Éditeur de la plateforme SaaS : gère les établissements clients, sans
+    # accès à leurs données métier (voir apps.organisations.isolation).
+    SUPER_ADMIN = 'SUPER_ADMIN', 'Super administrateur'
     ADMIN = 'ADMIN', 'Administrateur'
     TECHNICIEN = 'TECHNICIEN', 'Technicien'
     CHERCHEUR = 'CHERCHEUR', 'Membre du laboratoire'
@@ -72,6 +75,17 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         max_length=30, choices=StatutAcademique.choices, blank=True, null=True,
         help_text="Uniquement pertinent pour un enseignant-chercheur ; laissé vide pour les autres rôles."
     )
+    # Établissement de rattachement ; vide uniquement pour le super-admin.
+    organisation = models.ForeignKey(
+        'organisations.Organisation', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='utilisateurs'
+    )
+    # Enseignant-chercheur qui encadre l'étudiant : c'est lui qui reçoit et
+    # traite en priorité les demandes de réservation de ses étudiants.
+    encadrant = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='etudiants_encadres', limit_choices_to={'role': 'CHERCHEUR'},
+    )
     date_creation = models.DateTimeField(auto_now_add=True)
 
     is_staff = models.BooleanField(default=False)
@@ -112,13 +126,15 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
 class MotifJeton(models.TextChoices):
     INVITATION = 'INVITATION', 'Activation du compte'
     REINITIALISATION = 'REINITIALISATION', 'Mot de passe oublié'
+    VERIFICATION = 'VERIFICATION', "Vérification de l'adresse email"
 
 
 class JetonDefinitionMotDePasse(models.Model):
     """
-    Jeton envoyé par email pour choisir un mot de passe, dans deux cas :
-    l'invitation d'un compte créé par l'admin, et le « mot de passe
-    oublié ». Usage unique. secrets.token_urlsafe(32) produit 32 octets
+    Jeton envoyé par email dans trois cas : l'invitation d'un compte créé
+    par l'admin et le « mot de passe oublié » (l'utilisateur choisit un mot
+    de passe), ainsi que l'inscription libre (l'utilisateur confirme son
+    adresse email pour activer son compte). Usage unique. secrets.token_urlsafe(32) produit 32 octets
     aléatoires cryptographiquement sûrs (~43 caractères), impossibles à
     deviner, et utilisables tels quels dans une URL.
     """
@@ -129,6 +145,7 @@ class JetonDefinitionMotDePasse(models.Model):
     DUREES_VALIDITE = {
         MotifJeton.INVITATION: timedelta(days=3),
         MotifJeton.REINITIALISATION: timedelta(hours=1),
+        MotifJeton.VERIFICATION: timedelta(hours=24),
     }
 
     utilisateur = models.ForeignKey(Utilisateur, on_delete=models.CASCADE, related_name='jetons_mdp')

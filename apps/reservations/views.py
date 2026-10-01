@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, mixins, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -11,25 +11,38 @@ from apps.core.services import enregistrer as journaliser
 from apps.core.utils import lire_date, lire_id
 from apps.notifications.services import notifier, notifier_par_email
 from apps.notifications.models import TypeNotification
-from apps.utilisateurs.models import Utilisateur, StatutCompte, Role, RANG_STATUT_ACADEMIQUE
-from apps.equipements.models import Equipement
-from apps.projets.models import RANG_PRIORITE, NiveauPriorite
+from apps.organisations.isolation import est_super_admin, filtrer_par_organisation
+from apps.projets.models import NiveauPriorite
+from apps.utilisateurs.models import Role, StatutAcademique
 
-from .models import Reservation, StatutReservation
-from .serializers import ReservationSerializer
-from .services import creneaux_libres_jour
+from .models import AlerteCreneau, Reservation, StatutReservation, STATUTS_BLOQUANTS, STATUTS_EQUIPEMENT_NON_RESERVABLES
+from .serializers import AlerteCreneauSerializer, RefusSerializer, ReservationSerializer
+from .services import (
+    analyser_file, conflits_detailles, creer_alerte, equipements_equivalents, liberer_creneau,
+    proposer_creneaux, validateurs_pour,
+)
+
+ROLES_SUPERVISEURS = [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
 
 
 class EstValidateur(permissions.BasePermission):
     def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.role in [
-            Role.TECHNICIEN, Role.CHERCHEUR, Role.ADMIN
-        ]
+        return request.user.is_authenticated and request.user.role in ROLES_SUPERVISEURS
 
 
 class EstAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.role == Role.ADMIN
+
+
+class EstAdminOuService(permissions.BasePermission):
+    """
+    Rappels : l'admin d'un établissement (limité à ses réservations) ou le
+    compte de service du workflow d'automatisation, qui a le rôle
+    SUPER_ADMIN et traite les rappels de tous les établissements.
+    """
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and (request.user.role == Role.ADMIN or est_super_admin(request.user))
 
 
 class ReservationViewSet(viewsets.ModelViewSet):
@@ -42,19 +55,29 @@ class ReservationViewSet(viewsets.ModelViewSet):
     # on annule et on refait une demande.
     http_method_names = ['get', 'post', 'delete', 'head', 'options']
 
+    ACTIONS_RAPPEL = ['a_rappeler_24h', 'a_rappeler_1h', 'marquer_rappel_24h_envoye', 'marquer_rappel_1h_envoye']
+
     def get_permissions(self):
         if self.action == 'destroy':
             return [EstAdmin()]
         return super().get_permissions()
 
+    def _base(self):
+        """Réservations de l'établissement de l'utilisateur (isolation SaaS)."""
+        user = self.request.user
+        if self.action in self.ACTIONS_RAPPEL and est_super_admin(user):
+            return Reservation.objects.all()
+        return filtrer_par_organisation(Reservation.objects.all(), user, 'laboratoire__organisation')
+
     def get_queryset(self):
         user = self.request.user
-        est_superviseur = user.role in [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
+        est_superviseur = user.role in ROLES_SUPERVISEURS
         laboratoire_id = lire_id(self.request, 'laboratoire')
         date_debut = lire_date(self.request, 'date_debut')
         date_fin = lire_date(self.request, 'date_fin')
         statut = self.request.query_params.get('statut')
         inclure_toutes = self.request.query_params.get('all') == 'true'
+        base = self._base()
 
         # Règles de visibilité en liste :
         #  - ?all=true (superviseurs uniquement) : toutes les réservations ;
@@ -62,23 +85,25 @@ class ReservationViewSet(viewsets.ModelViewSet):
         #    VALIDEES (ce qui occupe réellement la salle) ;
         #  - sinon : uniquement « mes » réservations.
         # Hors liste (retrieve, actions detail=True), un superviseur accède
-        # à tout, un étudiant seulement à ses propres réservations : un id
-        # appartenant à quelqu'un d'autre renvoie 404.
+        # à tout l'établissement, un étudiant seulement à ses propres
+        # réservations : un id appartenant à quelqu'un d'autre renvoie 404.
         if self.action == 'list':
             if inclure_toutes and est_superviseur:
-                qs = Reservation.objects.all()
+                qs = base
             elif laboratoire_id:
-                qs = Reservation.objects.filter(statut=StatutReservation.VALIDEE)
+                qs = base.filter(statut=StatutReservation.VALIDEE)
             else:
-                qs = Reservation.objects.filter(demandeur=user)
+                qs = base.filter(demandeur=user)
 
             if self.request.query_params.get('archivees') != 'true':
                 qs = qs.exclude(est_archivee=True)
 
             if self.request.query_params.get('a_venir') == 'true':
-                qs = qs.filter(date__gte=timezone.now().date())
+                qs = qs.filter(date__gte=timezone.localdate())
+        elif self.action in self.ACTIONS_RAPPEL:
+            qs = base
         else:
-            qs = Reservation.objects.all() if est_superviseur else Reservation.objects.filter(demandeur=user)
+            qs = base if est_superviseur else base.filter(demandeur=user)
 
         if laboratoire_id:
             qs = qs.filter(laboratoire_id=laboratoire_id)
@@ -91,32 +116,18 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
         # Charge en une fois les objets liés affichés par le serializer
         # (évite une requête SQL par réservation : problème « N+1 »).
-        return qs.select_related('demandeur', 'laboratoire', 'projet').prefetch_related('equipements')
+        return qs.select_related('demandeur', 'laboratoire__organisation', 'projet').prefetch_related('equipements')
 
-    def create(self, request, *args, **kwargs):
+    # --- Construction et analyse d'une demande ---
+
+    def _lire_demande(self, request):
+        """Valide le JSON et renvoie (réservation non enregistrée, équipements)."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        # Le serializer renvoie des objets Equipement ; on garde les objets
-        # (pour les alternatives) et on en extrait les ids (pour le modèle).
+        # Le serializer renvoie des objets Equipement : on garde les objets
+        # (statut, catégorie) et on en extrait les ids (pour le modèle).
         equipements = data.pop('equipements', [])
-        equipements_ids = [e.id for e in equipements]
-        projet = data.get('projet')
-
-        # --- Détection de conflit AVANT création, pour pouvoir répondre
-        # avec des alternatives plutôt qu'une simple erreur si un conflit
-        # existe déjà sur l'un des équipements demandés.
-        conflits = Reservation.objects.none()
-        if equipements_ids:
-            conflits = Reservation.objects.filter(
-                equipements__id__in=equipements_ids, date=data['date'],
-                statut__in=[StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE],
-                heure_debut__lt=data['heure_fin'], heure_fin__gt=data['heure_debut'],
-            ).distinct()
-
-        if conflits.exists():
-            return self._reponse_conflit(request.user, projet, equipements, data, conflits)
-
         reservation = Reservation(
             demandeur=request.user,
             laboratoire=data['laboratoire'],
@@ -124,8 +135,80 @@ class ReservationViewSet(viewsets.ModelViewSet):
             heure_debut=data['heure_debut'],
             heure_fin=data['heure_fin'],
             motif=data['motif'],
-            projet=projet,
+            projet=data.get('projet'),
         )
+        try:
+            reservation.preparer([e.id for e in equipements])
+            Reservation._verifier_disponibilite(reservation.laboratoire, equipements)
+            reservation._verifier_maintenance([e.id for e in equipements])
+        except DjangoValidationError as e:
+            raise DRFValidationError(e.messages)
+        return reservation, equipements
+
+    def _alternatives(self, reservation, equipements, conflits):
+        ids = [e.id for e in equipements]
+        return {
+            'creneaux': proposer_creneaux(
+                ids, reservation.date, reservation.heure_debut, reservation.heure_fin, reservation.regles,
+            ),
+            'equipements_equivalents': equipements_equivalents(
+                reservation.laboratoire, equipements, conflits,
+                reservation.date, reservation.heure_debut, reservation.heure_fin,
+            ),
+        }
+
+    def _qui_traitera(self, reservation, equipements):
+        sensible = any(e.necessite_validation for e in equipements)
+        encadrant = reservation.demandeur.encadrant
+        if encadrant and not sensible:
+            return f"Votre encadrant, {encadrant.nom_complet}, traitera votre demande."
+        return "Un technicien du laboratoire traitera votre demande."
+
+    @action(detail=False, methods=['post'])
+    def verifier(self, request):
+        """
+        Vérification AVANT confirmation : le frontend l'appelle en ouvrant
+        le récapitulatif, pour afficher tout de suite les conflits, les
+        créneaux alternatifs, le statut que prendra la demande et sa place
+        dans la file d'attente. Rien n'est enregistré.
+        """
+        reservation, equipements = self._lire_demande(request)
+        conflits = conflits_detailles(equipements, reservation.date, reservation.heure_debut, reservation.heure_fin)
+        if conflits:
+            return Response({
+                'disponible': False,
+                'conflits': conflits,
+                'alternatives': self._alternatives(reservation, equipements, conflits),
+            })
+
+        ids = [e.id for e in equipements]
+        file = analyser_file(reservation, ids)
+        statut, raison = reservation.statut_initial(equipements, file['nombre'] > 0)
+        if statut == StatutReservation.EN_ATTENTE:
+            raison = f"{raison} {self._qui_traitera(reservation, equipements)}"
+        return Response({
+            'disponible': True,
+            'conflits': [],
+            'statut_prevu': statut,
+            'raison_statut': raison,
+            'file_attente': file,
+            'duree_minutes': reservation.duree_minutes,
+        })
+
+    def create(self, request, *args, **kwargs):
+        reservation, equipements = self._lire_demande(request)
+        equipements_ids = [e.id for e in equipements]
+
+        # Conflit avec une réservation acquise : on répond 409 avec des
+        # alternatives plutôt qu'une simple erreur.
+        conflits = conflits_detailles(equipements, reservation.date, reservation.heure_debut, reservation.heure_fin)
+        if conflits:
+            return Response({
+                'conflit': True,
+                'detail': "Ce créneau est déjà réservé sur l'équipement demandé.",
+                'conflits': conflits,
+                'alternatives': self._alternatives(reservation, equipements, conflits),
+            }, status=status.HTTP_409_CONFLICT)
 
         try:
             reservation.creer(equipements_ids=equipements_ids)
@@ -135,18 +218,14 @@ class ReservationViewSet(viewsets.ModelViewSet):
         journaliser(request.user, 'Création de réservation', reservation,
                     f'Statut initial : {reservation.statut}')
 
-        # EN_ATTENTE -> on prévient ceux qui peuvent valider (notification
-        # interne). VALIDEE d'office -> on confirme directement au
-        # demandeur par email (via le webhook n8n).
+        # EN_ATTENTE -> on prévient ceux qui peuvent la traiter (l'encadrant
+        # en priorité). VALIDEE d'office -> confirmation par email au
+        # demandeur (via le webhook n8n).
         if reservation.statut == StatutReservation.EN_ATTENTE:
-            # Mêmes rôles que la permission EstValidateur, sauf le demandeur
-            # lui-même (il ne peut pas statuer sur sa propre demande).
-            validateurs = Utilisateur.objects.filter(
-                role__in=[Role.TECHNICIEN, Role.CHERCHEUR, Role.ADMIN], statut_compte=StatutCompte.ACTIF
-            ).exclude(pk=request.user.pk)
-            for validateur in validateurs:
+            for validateur in validateurs_pour(reservation):
                 notifier(validateur, 'Nouvelle demande de réservation',
-                         f'{request.user} a soumis une demande pour le {reservation.date}.',
+                         f'{request.user.nom_complet} a soumis une demande pour le {reservation.date:%d/%m/%Y} '
+                         f'({reservation.heure_debut:%H:%M}-{reservation.heure_fin:%H:%M}).',
                          TypeNotification.RESERVATION, reservation)
         else:
             notifier_par_email(reservation.demandeur, "confirmation", {
@@ -158,110 +237,118 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
         return Response(self.get_serializer(reservation).data, status=status.HTTP_201_CREATED)
 
-    # --- Résolution intelligente des conflits — méthodes privées ---
+    # --- File d'attente des validateurs ---
 
-    def _cle_priorite(self, projet, utilisateur):
+    @action(detail=False, methods=['get'], permission_classes=[EstValidateur])
+    def file_attente(self, request):
         """
-        Tuple (priorité du projet, rang académique du demandeur). La
-        comparaison de tuples en Python départage d'abord sur le premier
-        élément, puis sur le second en cas d'égalité — exactement la règle
-        voulue : le niveau du projet prime, le statut académique ne
-        départage qu'à priorité de projet égale.
+        Demandes que l'utilisateur peut traiter, avec pour chacune une
+        analyse d'aide à la décision : concurrence sur le créneau, rang de
+        priorité, obstacles éventuels et une recommandation motivée.
+        Un enseignant-chercheur ne voit que les demandes de ses étudiants.
         """
-        # Sans projet rattaché, la demande est traitée comme NORMALE ; sans
-        # statut académique (étudiant, technicien...), le rang vaut 0.
-        rang_projet = RANG_PRIORITE[projet.niveau_priorite] if projet else RANG_PRIORITE[NiveauPriorite.NORMALE]
-        rang_academique = RANG_STATUT_ACADEMIQUE.get(utilisateur.statut_academique, 0)
-        return (rang_projet, rang_academique)
+        user = request.user
+        qs = self._base().filter(statut=StatutReservation.EN_ATTENTE).select_related(
+            'demandeur__encadrant', 'laboratoire__organisation', 'projet',
+        ).prefetch_related('equipements').order_by('date', 'heure_debut', 'date_creation')
+        if user.role == Role.CHERCHEUR:
+            qs = qs.filter(demandeur__encadrant=user)
 
-    def _reponse_conflit(self, demandeur, projet, equipements, data, conflits):
-        # Le système ne déplace JAMAIS une réservation automatiquement : il
-        # répond 409 avec des créneaux alternatifs, et si le nouveau
-        # demandeur est plus prioritaire qu'une demande encore en attente,
-        # il alerte les techniciens/admins qui arbitrent humainement.
-        ma_priorite = self._cle_priorite(projet, demandeur)
-        priorite_superieure = False
-
-        # On ne compare et n'alerte QUE sur les réservations encore
-        # EN_ATTENTE — une réservation déjà VALIDEE n'est jamais remise en
-        # question automatiquement, peu importe la priorité du demandeur.
-        for c in conflits.filter(statut=StatutReservation.EN_ATTENTE):
-            if ma_priorite > self._cle_priorite(c.projet, c.demandeur):
-                priorite_superieure = True
-                validateurs = Utilisateur.objects.filter(
-                    role__in=[Role.TECHNICIEN, Role.ADMIN], statut_compte=StatutCompte.ACTIF
-                )
-                for v in validateurs:
-                    notifier(v, 'Conflit de priorité détecté',
-                             f"La demande de {demandeur.nom_complet} entre en conflit avec une demande en "
-                             f"attente de {c.demandeur.nom_complet} sur le créneau du {data['date']}.",
-                             TypeNotification.RESERVATION, c)
-
-        return Response({
-            'conflit': True,
-            'detail': "Ce créneau est déjà réservé sur l'équipement demandé.",
-            'priorite_superieure': priorite_superieure,
-            'alternatives': self._chercher_alternatives(
-                data['laboratoire'], equipements, data['date'], data['heure_debut'], data['heure_fin']
-            ),
-        }, status=status.HTTP_409_CONFLICT)
-
-    def _chercher_alternatives(self, laboratoire, equipements, date, heure_debut, heure_fin):
-        """
-        Deux types de suggestions :
-         1. même équipement, autre moment : pour chaque équipement, on
-            parcourt le jour demandé + les 5 suivants et on retient la
-            première plage libre assez longue pour la durée voulue (une
-            seule proposition par jour grâce au break) ;
-         2. même moment, autre équipement : un équipement de la même
-            catégorie, dans le même labo, libre sur le créneau demandé.
-        """
-        # datetime.combine est nécessaire car on ne peut pas soustraire deux
-        # objets time en Python ; on obtient ainsi un timedelta.
-        duree =datetime.combine(date, heure_fin) - datetime.combine(date, heure_debut)
-        resultats = {'memes_equipements': [], 'equipements_equivalents': []}
-
-        # On ne propose jamais un créneau déjà commencé.
-        maintenant = timezone.localtime().replace(tzinfo=None, second=0, microsecond=0)
-
-        for equipement in equipements:
-            for offset in range(6):
-                jour = date + timedelta(days=offset)
-                for debut, fin in creneaux_libres_jour(equipement.id, jour):
-                    debut_dt, fin_dt = datetime.combine(jour, debut), datetime.combine(jour, fin)
-                    debut_dt = max(debut_dt, maintenant)
-                    if fin_dt - debut_dt >= duree:
-                        resultats['memes_equipements'].append({
-                            'equipement': equipement.nom, 'date': jour.isoformat(),
-                            'heure_debut': debut_dt.strftime('%H:%M'),
-                            'heure_fin': (debut_dt + duree).time().strftime('%H:%M'),
-                        })
-                        break
-                if len(resultats['memes_equipements']) >= 3:
-                    break
-
-        for equipement in equipements:
-            if not equipement.categorie:
+        resultats = []
+        for reservation in qs:
+            if not reservation.peut_statuer(user):
                 continue
-            for equiv in Equipement.objects.filter(laboratoire=laboratoire, categorie=equipement.categorie).exclude(pk=equipement.pk):
-                en_conflit = Reservation.objects.filter(
-                    equipements=equiv, date=date, statut__in=[StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE],
-                    heure_debut__lt=heure_fin, heure_fin__gt=heure_debut,
-                ).exists()
-                if not en_conflit:
-                    resultats['equipements_equivalents'].append({'id': equiv.id, 'nom': equiv.nom})
+            donnees = self.get_serializer(reservation).data
+            donnees['analyse'] = self._analyser_pour_validateur(reservation)
+            resultats.append(donnees)
+        return Response(resultats)
 
-        return resultats
+    def _analyser_pour_validateur(self, reservation):
+        equipements = list(reservation.equipements.all())
+        ids = [e.id for e in equipements]
+        concurrentes = list(reservation.concurrentes(ids).select_related('projet', 'demandeur'))
+        rang = reservation.rang_dans_la_file(concurrentes)
+        projet = reservation.projet
+        niveau = projet.get_niveau_priorite_display() if projet else NiveauPriorite.NORMALE.label
+        statut_academique = reservation.demandeur.statut_academique
+        profil = StatutAcademique(statut_academique).label if statut_academique else reservation.demandeur.get_role_display()
+        creneau_passe = datetime.combine(reservation.date, reservation.heure_debut) < timezone.localtime().replace(tzinfo=None)
+        conflit = Reservation._a_un_conflit(reservation.date, reservation.heure_debut, reservation.heure_fin, ids, reservation.pk)
+        en_panne = [e.nom for e in equipements if e.statut in STATUTS_EQUIPEMENT_NON_RESERVABLES]
 
-    # --- Actions existantes, strictement inchangées ---
+        if creneau_passe:
+            recommandation, raison = 'refuser', "Le créneau est déjà passé."
+        elif conflit:
+            recommandation, raison = 'refuser', "Le créneau a déjà été attribué à une autre réservation."
+        elif en_panne:
+            recommandation, raison = 'refuser', f"Équipement indisponible (panne ou maintenance) : {', '.join(en_panne)}."
+        elif concurrentes and rang > 1:
+            recommandation, raison = 'arbitrer', (
+                f"{len(concurrentes)} demande(s) concurrente(s) ; celle-ci est classée {rang}e selon les priorités."
+            )
+        elif concurrentes:
+            recommandation, raison = 'valider', (
+                f"Prioritaire parmi {len(concurrentes) + 1} demandes (projet {niveau.lower()}, {profil.lower()}). "
+                "La valider refusera automatiquement les autres, avec des alternatives."
+            )
+        else:
+            recommandation, raison = 'valider', "Créneau libre, aucune demande concurrente."
+
+        return {
+            'priorite_projet': niveau,
+            'profil_demandeur': profil,
+            'concurrentes': len(concurrentes),
+            'rang': rang,
+            'creneau_passe': creneau_passe,
+            'conflit_avec_reservation_validee': conflit,
+            'recommandation': recommandation,
+            'raison': raison,
+        }
+
+    # --- Liste d'attente des créneaux ---
+
+    @action(detail=False, methods=['get', 'post'])
+    def alertes(self, request):
+        """
+        GET : mes alertes actives. POST : « prévenez-moi si ce créneau se
+        libère » (proposé après un conflit).
+        """
+        if request.method == 'GET':
+            alertes = AlerteCreneau.objects.filter(
+                utilisateur=request.user, active=True, date__gte=timezone.localdate(),
+            ).select_related('laboratoire').prefetch_related('equipements')
+            return Response(AlerteCreneauSerializer(alertes, many=True).data)
+
+        serializer = AlerteCreneauSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        alerte = creer_alerte(
+            request.user, data['laboratoire'], [e.id for e in data.get('equipements', [])],
+            data['date'], data['heure_debut'], data['heure_fin'],
+        )
+        return Response(AlerteCreneauSerializer(alerte).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path=r'alertes/(?P<alerte_id>\d+)/supprimer')
+    def supprimer_alerte(self, request, alerte_id=None):
+        supprimees, _ = AlerteCreneau.objects.filter(pk=alerte_id, utilisateur=request.user).delete()
+        if not supprimees:
+            return Response({'detail': 'Alerte introuvable.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # --- Actions ---
 
     @action(detail=False, methods=['get'])
     def creneaux_occupes(self, request):
+        """
+        Pour le calendrier : les créneaux acquis (qui bloquent) et les
+        demandes en attente (qui ne bloquent pas mais signalent une
+        concurrence probable), distingués par 'statut'.
+        """
         date_debut = lire_date(request, 'date_debut')
         date_fin = lire_date(request, 'date_fin')
         equipement_id = lire_id(request, 'equipement')
 
-        qs = Reservation.objects.filter(statut__in=[StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE])
+        qs = self._base().filter(statut__in=STATUTS_BLOQUANTS + [StatutReservation.EN_ATTENTE])
         if equipement_id:
             qs = qs.filter(equipements__id=equipement_id)
         if date_debut:
@@ -269,34 +356,60 @@ class ReservationViewSet(viewsets.ModelViewSet):
         if date_fin:
             qs = qs.filter(date__lte=date_fin)
 
-        return Response(list(qs.values('date', 'heure_debut', 'heure_fin')))
+        return Response(list(qs.values('date', 'heure_debut', 'heure_fin', 'statut').distinct()))
 
     @action(detail=True, methods=['post'], permission_classes=[EstValidateur])
     def valider(self, request, pk=None):
         reservation = self.get_object()
         try:
-            reservation.valider(validateur=request.user)
+            refusees = reservation.valider(validateur=request.user)
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages)
-        journaliser(request.user, 'Validation de réservation', reservation)
+        journaliser(request.user, 'Validation de réservation', reservation,
+                    f'{len(refusees)} demande(s) concurrente(s) refusée(s)' if refusees else '')
         notifier(reservation.demandeur, 'Réservation validée',
-                 f'Votre réservation du {reservation.date} a été validée.',
+                 f'Votre réservation du {reservation.date:%d/%m/%Y} a été validée.',
                  TypeNotification.VALIDATION, reservation)
         notifier_par_email(reservation.demandeur, "validation", {
             "laboratoire": reservation.laboratoire.nom, "date": str(reservation.date),
         })
+        for refusee in refusees:
+            self._prevenir_refus_concurrence(refusee)
         return Response(self.get_serializer(reservation).data)
+
+    def _prevenir_refus_concurrence(self, reservation):
+        """
+        Le demandeur écarté reçoit la meilleure alternative calculée, et il
+        est inscrit d'office sur la liste d'attente du créneau : si la
+        réservation retenue est annulée, il sera prévenu.
+        """
+        ids = list(reservation.equipements.values_list('id', flat=True))
+        propositions = proposer_creneaux(
+            ids, reservation.date, reservation.heure_debut, reservation.heure_fin, reservation.regles, limite=1,
+        )
+        suggestion = f" Suggestion : {propositions[0]['message'].lower()}." if propositions else ''
+        notifier(reservation.demandeur, 'Réservation non retenue',
+                 f"Votre demande du {reservation.date:%d/%m/%Y} ({reservation.heure_debut:%H:%M}-"
+                 f"{reservation.heure_fin:%H:%M}) a été attribuée à une demande prioritaire.{suggestion} "
+                 "Vous serez prévenu si le créneau se libère.",
+                 TypeNotification.VALIDATION, reservation, email=True)
+        creer_alerte(reservation.demandeur, reservation.laboratoire, ids,
+                     reservation.date, reservation.heure_debut, reservation.heure_fin)
+        journaliser(reservation.validateur, 'Refus automatique (concurrence)', reservation)
 
     @action(detail=True, methods=['post'], permission_classes=[EstValidateur])
     def refuser(self, request, pk=None):
         reservation = self.get_object()
+        serializer = RefusSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        motif = serializer.validated_data.get('motif', '')
         try:
-            reservation.refuser(validateur=request.user)
+            reservation.refuser(validateur=request.user, motif=motif)
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages)
-        journaliser(request.user, 'Refus de réservation', reservation)
+        journaliser(request.user, 'Refus de réservation', reservation, motif)
         notifier(reservation.demandeur, 'Réservation refusée',
-                 f'Votre réservation du {reservation.date} a été refusée.',
+                 f'Votre réservation du {reservation.date:%d/%m/%Y} a été refusée.' + (f' Motif : {motif}' if motif else ''),
                  TypeNotification.VALIDATION, reservation)
         notifier_par_email(reservation.demandeur, "refus", {
             "laboratoire": reservation.laboratoire.nom, "date": str(reservation.date),
@@ -306,11 +419,22 @@ class ReservationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
         reservation = self.get_object()
+        user = request.user
+        # Le demandeur annule sa réservation ; un technicien ou un admin peut
+        # annuler celle d'un autre (ex. fermeture exceptionnelle du labo).
+        if reservation.demandeur_id != user.id and user.role not in [Role.TECHNICIEN, Role.ADMIN]:
+            raise DRFValidationError("Vous ne pouvez annuler que vos propres réservations.")
         try:
-            reservation.annuler()
+            liberait_creneau = reservation.annuler()
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages)
-        journaliser(request.user, 'Annulation de réservation', reservation)
+        journaliser(user, 'Annulation de réservation', reservation)
+        if reservation.demandeur_id != user.id:
+            notifier(reservation.demandeur, 'Réservation annulée',
+                     f'Votre réservation du {reservation.date:%d/%m/%Y} a été annulée par {user.nom_complet}.',
+                     TypeNotification.RESERVATION, reservation, email=True)
+        if liberait_creneau:
+            liberer_creneau(reservation)
         return Response(self.get_serializer(reservation).data)
 
     @action(detail=True, methods=['post'], permission_classes=[EstAdmin])
@@ -335,53 +459,37 @@ class ReservationViewSet(viewsets.ModelViewSet):
     # Filtrage en deux temps : le SQL pré-filtre par date (date et heure
     # sont deux colonnes séparées), puis Python compare le datetime exact.
 
-    # Réservés à l'admin (compte de service du workflow), comme les actions
-    # marquer_rappel_* : ils listent les réservations de TOUS les
-    # utilisateurs, avec leurs emails.
-    @action(detail=False, methods=['get'], permission_classes=[EstAdmin])
+    def _a_rappeler(self, debut_fenetre, fin_fenetre, champ_envoye):
+        candidates = self.get_queryset().filter(
+            statut=StatutReservation.VALIDEE,
+            date__gte=debut_fenetre.date(),
+            date__lte=fin_fenetre.date(),
+            **{champ_envoye: False},
+        )
+        resultats = [
+            r for r in candidates
+            if debut_fenetre <= timezone.make_aware(datetime.combine(r.date, r.heure_debut)) <= fin_fenetre
+        ]
+        return Response(self.get_serializer(resultats, many=True).data)
+
+    @action(detail=False, methods=['get'], permission_classes=[EstAdminOuService])
     def a_rappeler_24h(self, request):
         maintenant = timezone.localtime()
-        debut_fenetre = maintenant + timedelta(hours=23)
-        fin_fenetre = maintenant + timedelta(hours=25)
+        return self._a_rappeler(maintenant + timedelta(hours=23), maintenant + timedelta(hours=25), 'rappel_24h_envoye')
 
-        candidates = Reservation.objects.select_related('demandeur', 'laboratoire', 'projet').prefetch_related('equipements').filter(
-            statut=StatutReservation.VALIDEE,
-            rappel_24h_envoye=False,
-            date__gte=debut_fenetre.date(),
-            date__lte=fin_fenetre.date(),
-        )
-        resultats = [
-            r for r in candidates
-            if debut_fenetre <= timezone.make_aware(datetime.combine(r.date, r.heure_debut)) <= fin_fenetre
-        ]
-        return Response(self.get_serializer(resultats, many=True).data)
-
-    @action(detail=False, methods=['get'], permission_classes=[EstAdmin])
+    @action(detail=False, methods=['get'], permission_classes=[EstAdminOuService])
     def a_rappeler_1h(self, request):
         maintenant = timezone.localtime()
-        debut_fenetre = maintenant
-        fin_fenetre = maintenant + timedelta(hours=2)
+        return self._a_rappeler(maintenant, maintenant + timedelta(hours=2), 'rappel_1h_envoye')
 
-        candidates = Reservation.objects.select_related('demandeur', 'laboratoire', 'projet').prefetch_related('equipements').filter(
-            statut=StatutReservation.VALIDEE,
-            rappel_1h_envoye=False,  # corrigé — pointait sur rappel_24h_envoye par erreur
-            date__gte=debut_fenetre.date(),
-            date__lte=fin_fenetre.date(),
-        )
-        resultats = [
-            r for r in candidates
-            if debut_fenetre <= timezone.make_aware(datetime.combine(r.date, r.heure_debut)) <= fin_fenetre
-        ]
-        return Response(self.get_serializer(resultats, many=True).data)
-
-    @action(detail=True, methods=['post'], permission_classes=[EstAdmin])
+    @action(detail=True, methods=['post'], permission_classes=[EstAdminOuService])
     def marquer_rappel_24h_envoye(self, request, pk=None):
         reservation = self.get_object()
         reservation.rappel_24h_envoye = True
         reservation.save(update_fields=['rappel_24h_envoye'])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=True, methods=['post'], permission_classes=[EstAdmin])
+    @action(detail=True, methods=['post'], permission_classes=[EstAdminOuService])
     def marquer_rappel_1h_envoye(self, request, pk=None):
         reservation = self.get_object()
         reservation.rappel_1h_envoye = True

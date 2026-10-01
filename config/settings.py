@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'drf_spectacular',
 
     # Apps UMRED
+    'apps.organisations',
     'apps.utilisateurs',
     'apps.laboratoires',
     'apps.equipements',
@@ -163,8 +164,17 @@ DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='UMRED Labo <no-reply@umr
 
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:4200')
 
+# Service IA (FastAPI) : rédige la synthèse hebdomadaire en langage naturel.
+IA_SERVICE_URL = env('IA_SERVICE_URL', default='http://localhost:8001/api')
+
+# Secret partagé avec n8n pour déclencher les tâches planifiées
+# (/api/taches/...). Vide = tâches désactivées.
+TACHES_TOKEN = env('TACHES_TOKEN', default='')
+
 # Webhook n8n qui envoie les emails de réservation. Vide = envoi désactivé.
-N8N_WEBHOOK_URL = env('N8N_WEBHOOK_URL', default='http://localhost:5678/webhook-test/umred-notification-reservation')
+# Vide par défaut = pas d'envoi : une URL « webhook-test » ne répond que
+# lorsque l'éditeur n8n est ouvert, elle ne doit jamais servir en production.
+N8N_WEBHOOK_URL = env('N8N_WEBHOOK_URL', default='')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'

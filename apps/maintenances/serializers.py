@@ -1,9 +1,11 @@
 from rest_framework import serializers
 from apps.equipements.models import Equipement
+from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Maintenance
 
 
-class MaintenanceSerializer(serializers.ModelSerializer):
+class MaintenanceSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
+    champs_organisation = {'equipement': 'laboratoire__organisation'}
     equipement_nom = serializers.CharField(source='equipement.nom', read_only=True)
     equipement_numero_serie = serializers.CharField(source='equipement.numero_serie', read_only=True)
     equipement_laboratoire_nom = serializers.CharField(source='equipement.laboratoire.nom', read_only=True)
@@ -23,7 +25,8 @@ class MaintenanceSerializer(serializers.ModelSerializer):
         read_only_fields = ['technicien', 'statut', 'date_debut', 'date_fin', 'date_creation', 'signale_par']
 
 
-class SignalementPanneSerializer(serializers.Serializer):
+class SignalementPanneSerializer(ChampsOrganisationMixin, serializers.Serializer):
+    champs_organisation = {'equipement': 'laboratoire__organisation'}
     equipement = serializers.PrimaryKeyRelatedField(queryset=Equipement.objects.all())
     description = serializers.CharField()
 

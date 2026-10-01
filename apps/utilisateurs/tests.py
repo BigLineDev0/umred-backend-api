@@ -4,7 +4,12 @@ from django.core.cache import cache
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.organisations.models import Organisation
 from .models import Utilisateur, Role, StatutAcademique
+
+
+def organisation_test():
+    return Organisation.objects.get_or_create(slug='test', defaults={'nom': 'Université Test'})[0]
 
 
 class DesactivationCompteTests(APITestCase):
@@ -141,9 +146,131 @@ class MotDePasseTests(APITestCase):
     def test_inscription_mot_de_passe_faible_refusee(self):
         reponse = self.client.post('/api/auth/register/', {
             'nom': 'Ba', 'prenom': 'Moussa', 'email': 'moussa@umred.sn', 'password': 'password',
+            'organisation': organisation_test().id,
         }, format='json')
         self.assertEqual(reponse.status_code, 400)
         self.assertIn('password', reponse.data)
+
+
+class ActivationParEmailTests(APITestCase):
+    MDP = 'Mdp-Solide-2026'
+
+    def setUp(self):
+        cache.clear()
+
+    def _inscrire(self, email='moussa@umred.sn'):
+        return self.client.post('/api/auth/register/', {
+            'nom': 'Ba', 'prenom': 'Moussa', 'email': email, 'password': self.MDP,
+            'organisation': organisation_test().id,
+        }, format='json')
+
+    def _jeton(self):
+        from .models import JetonDefinitionMotDePasse, MotifJeton
+        return JetonDefinitionMotDePasse.objects.get(motif=MotifJeton.VERIFICATION, utilise=False)
+
+    def _connexion(self, password=None):
+        return self.client.post('/api/auth/login/', {
+            'email': 'moussa@umred.sn', 'password': password or self.MDP,
+        }, format='json')
+
+    def test_inscription_cree_un_compte_bloque_et_envoie_le_lien(self):
+        from django.core import mail
+        from .models import StatutCompte
+
+        reponse = self._inscrire()
+
+        self.assertEqual(reponse.status_code, 201)
+        self.assertNotIn('access', reponse.data)
+        user = Utilisateur.objects.get(email='moussa@umred.sn')
+        self.assertEqual(user.statut_compte, StatutCompte.EN_ATTENTE)
+        self.assertFalse(user.is_active)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(f'/activer-compte/{self._jeton().jeton}', mail.outbox[0].body)
+
+    def test_connexion_refusee_avant_activation(self):
+        self._inscrire()
+        reponse = self._connexion()
+        self.assertEqual(reponse.status_code, 401)
+        self.assertEqual(reponse.data['code'], 'email_non_verifie')
+
+    def test_mauvais_mot_de_passe_ne_revele_pas_le_compte_en_attente(self):
+        self._inscrire()
+        reponse = self._connexion(password='Faux-Mdp-2026')
+        self.assertEqual(reponse.status_code, 401)
+        self.assertNotEqual(reponse.data.get('code'), 'email_non_verifie')
+
+    def test_activation_puis_connexion(self):
+        from .models import StatutCompte
+        self._inscrire()
+        jeton = self._jeton()
+
+        reponse = self.client.post('/api/auth/activer-compte/', {'jeton': jeton.jeton}, format='json')
+
+        self.assertEqual(reponse.status_code, 200)
+        user = Utilisateur.objects.get(email='moussa@umred.sn')
+        self.assertEqual(user.statut_compte, StatutCompte.ACTIF)
+        self.assertTrue(user.is_active)
+        self.assertEqual(self._connexion().status_code, 200)
+        # Second clic sur le même lien : pas une erreur.
+        second = self.client.post('/api/auth/activer-compte/', {'jeton': jeton.jeton}, format='json')
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data['deja_active'])
+
+    def test_lien_d_activation_expire(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from .models import JetonDefinitionMotDePasse
+        self._inscrire()
+        jeton = self._jeton()
+        JetonDefinitionMotDePasse.objects.filter(pk=jeton.pk).update(date_creation=timezone.now() - timedelta(hours=25))
+
+        reponse = self.client.post('/api/auth/activer-compte/', {'jeton': jeton.jeton}, format='json')
+
+        self.assertEqual(reponse.status_code, 400)
+        self.assertFalse(Utilisateur.objects.get(email='moussa@umred.sn').is_active)
+
+    def test_compte_desactive_ne_se_reactive_pas_avec_le_lien(self):
+        self._inscrire()
+        jeton = self._jeton()
+        Utilisateur.objects.get(email='moussa@umred.sn').desactiver_compte()
+
+        reponse = self.client.post('/api/auth/activer-compte/', {'jeton': jeton.jeton}, format='json')
+
+        self.assertEqual(reponse.status_code, 400)
+        self.assertFalse(Utilisateur.objects.get(email='moussa@umred.sn').is_active)
+
+    def test_jeton_d_activation_refuse_pour_definir_le_mot_de_passe(self):
+        self._inscrire()
+        jeton = self._jeton()
+        self.assertEqual(self.client.get(f'/api/auth/verifier-jeton/{jeton.jeton}/').status_code, 404)
+        reponse = self.client.post('/api/auth/definir-mot-de-passe/',
+                                   {'jeton': jeton.jeton, 'password': 'Autre-Mdp-2026'}, format='json')
+        self.assertEqual(reponse.status_code, 404)
+
+    def test_renvoi_du_lien_invalide_l_ancien(self):
+        from django.core import mail
+        self._inscrire()
+        ancien = self._jeton()
+
+        reponse = self.client.post('/api/auth/renvoyer-activation/', {'email': 'MOUSSA@umred.sn'}, format='json')
+
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(len(mail.outbox), 2)
+        ancien.refresh_from_db()
+        self.assertFalse(ancien.est_valide())
+        self.assertIn(self._jeton().jeton, mail.outbox[1].body)
+
+    def test_renvoi_meme_reponse_si_email_inconnu_ou_deja_actif(self):
+        from django.core import mail
+        Utilisateur.objects.create_user(email='actif@umred.sn', password=self.MDP, nom='A', prenom='A', role=Role.ETUDIANT)
+        self._inscrire()
+        en_attente = self.client.post('/api/auth/renvoyer-activation/', {'email': 'moussa@umred.sn'}, format='json')
+        actif = self.client.post('/api/auth/renvoyer-activation/', {'email': 'actif@umred.sn'}, format='json')
+        inconnu = self.client.post('/api/auth/renvoyer-activation/', {'email': 'personne@umred.sn'}, format='json')
+        self.assertEqual(en_attente.data, actif.data)
+        self.assertEqual(en_attente.data, inconnu.data)
+        # 1 email d'inscription + 1 renvoi (le compte en attente uniquement).
+        self.assertEqual(len(mail.outbox), 2)
 
 
 class EmailInsensibleCasseTests(APITestCase):
@@ -159,5 +286,7 @@ class EmailInsensibleCasseTests(APITestCase):
     def test_pas_de_doublon_a_la_casse_pres(self):
         reponse = self.client.post('/api/auth/register/', {
             'nom': 'X', 'prenom': 'Y', 'email': 'AWA@umred.sn', 'password': 'Mdp-Solide-2026',
+            'organisation': organisation_test().id,
         }, format='json')
         self.assertEqual(reponse.status_code, 400)
+        self.assertIn('email', reponse.data)

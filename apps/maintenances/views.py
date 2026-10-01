@@ -8,12 +8,16 @@ from apps.core.utils import lire_date, lire_id
 from rest_framework import serializers
 
 from apps.notifications.services import notifier
+from apps.equipements.services import prevenir_indisponibilite, reservations_impactees
+from apps.organisations.isolation import filtrer_par_organisation
 from apps.notifications.models import TypeNotification
 from apps.utilisateurs.models import Utilisateur, StatutCompte, Role
 
 from .models import Maintenance, StatutMaintenance
 from .serializers import MaintenanceSerializer, SignalementPanneSerializer, ClotureMaintenanceSerializer
 from django.db.models import Q
+from django.utils import timezone
+from datetime import timedelta
 
 
 class EstTechnicienOuAdmin(permissions.BasePermission):
@@ -38,14 +42,15 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         user = self.request.user
         equipement_id = lire_id(self.request, 'equipement')
 
+        base = filtrer_par_organisation(Maintenance.objects.all(), user, 'equipement__laboratoire__organisation')
         if user.role == Role.ADMIN or equipement_id:
-            qs = Maintenance.objects.all()
+            qs = base
         else:
             # Un technicien voit ses propres interventions assignées, PLUS
             # toutes les pannes "signalées" mais pas encore prises en charge
             # (technicien=None) — c'est la file d'attente commune que
             # n'importe quel technicien doit pouvoir consulter et récupérer.
-            qs = Maintenance.objects.filter(Q(technicien=user) | Q(statut=StatutMaintenance.SIGNALEE))
+            qs = base.filter(Q(technicien=user) | Q(statut=StatutMaintenance.SIGNALEE))
 
         statut = self.request.query_params.get('statut')
         type_ = self.request.query_params.get('type')
@@ -75,12 +80,23 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         
         # Enregistrement de logs
         journaliser(request.user, 'Planification de maintenance', maintenance)
-            
-        return Response(self.get_serializer(maintenance).data, status=status.HTTP_201_CREATED)
+
+        # Les réservations prévues le jour de l'intervention sont compromises :
+        # leurs demandeurs sont prévenus (avec un équipement équivalent si possible).
+        jour = timezone.localtime(maintenance.date_planifiee).date()
+        impactees = reservations_impactees(maintenance.equipement, jusqu_au=jour, depuis=jour)
+        prevenir_indisponibilite(
+            maintenance.equipement, impactees,
+            f"Une maintenance est planifiée sur {maintenance.equipement.nom} le {jour:%d/%m/%Y}.",
+        )
+
+        donnees = self.get_serializer(maintenance).data
+        donnees['reservations_impactees'] = len(impactees)
+        return Response(donnees, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'])
     def signaler_panne(self, request):
-        serializer = SignalementPanneSerializer(data=request.data)
+        serializer = SignalementPanneSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         try:
             maintenance = Maintenance.creer_depuis_signalement(
@@ -94,14 +110,29 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         # Enregistrement de logs
         journaliser(request.user, 'Signalement de panne', maintenance)
         
-        # Envoi notification aux techniciens
-        techniciens = Utilisateur.objects.filter(role=Role.TECHNICIEN, statut_compte=StatutCompte.ACTIF)
+        # Les réservations des 14 prochains jours sur l'équipement sont
+        # compromises tant que la panne n'est pas réparée.
+        impactees = reservations_impactees(
+            maintenance.equipement, jusqu_au=timezone.localdate() + timedelta(days=14),
+        )
+        prevenir_indisponibilite(
+            maintenance.equipement, impactees, f"Une panne a été signalée sur {maintenance.equipement.nom}.",
+        )
+
+        # Envoi notification aux techniciens de l'établissement
+        techniciens = Utilisateur.objects.filter(
+            role=Role.TECHNICIEN, statut_compte=StatutCompte.ACTIF,
+            organisation_id=maintenance.equipement.laboratoire.organisation_id,
+        )
+        impact = f' {len(impactees)} réservation(s) à venir sont concernées.' if impactees else ''
         for technicien in techniciens:
             notifier(technicien, 'Panne signalée',
-                    f'{request.user} a signalé une panne sur {maintenance.equipement}.',
+                    f'{request.user} a signalé une panne sur {maintenance.equipement}.{impact}',
                     TypeNotification.MAINTENANCE, maintenance)
-            
-        return Response(MaintenanceSerializer(maintenance).data, status=status.HTTP_201_CREATED)
+
+        donnees = MaintenanceSerializer(maintenance).data
+        donnees['reservations_impactees'] = len(impactees)
+        return Response(donnees, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def demarrer(self, request, pk=None):

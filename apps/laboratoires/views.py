@@ -6,6 +6,7 @@ from .models import Laboratoire
 from .serializers import LaboratoireSerializer
 from apps.utilisateurs.models import Role
 from apps.core.services import enregistrer as journaliser
+from apps.organisations.isolation import filtrer_par_organisation
 
 
 class EstAdmin(permissions.BasePermission):
@@ -29,18 +30,40 @@ class LaboratoireViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # Les deux compteurs du serializer sont calculés par la base en une
         # seule requête (COUNT ... GROUP BY) au lieu de 2 requêtes par labo.
-        return super().get_queryset().select_related('responsable').annotate(
+        qs = filtrer_par_organisation(super().get_queryset(), self.request.user)
+        return qs.select_related('responsable').annotate(
             nb_equipements=Count('equipements'),
             nb_equipements_disponibles=Count('equipements', filter=Q(equipements__statut=StatutEquipement.DISPONIBLE)),
         )
 
     def perform_create(self, serializer):
-        instance = serializer.save()
+        # Un laboratoire est toujours créé dans l'établissement de l'admin.
+        instance = serializer.save(organisation=self.request.user.organisation)
         journaliser(self.request.user, 'Création de laboratoire', instance)
 
     def perform_update(self, serializer):
+        from django.utils import timezone
+        from apps.laboratoires.models import StatutLaboratoire
+        from apps.notifications.models import TypeNotification
+        from apps.notifications.services import notifier
+        from apps.reservations.models import StatutReservation
+
+        ancien_statut = serializer.instance.statut
         instance = serializer.save()
         journaliser(self.request.user, 'Modification de laboratoire', instance)
+        # Fermeture du laboratoire : chaque titulaire d'une réservation à
+        # venir est prévenu (notification + email) pour s'organiser.
+        if ancien_statut != StatutLaboratoire.INDISPONIBLE and instance.statut == StatutLaboratoire.INDISPONIBLE:
+            a_venir = instance.reservations.filter(
+                date__gte=timezone.localdate(),
+                statut__in=[StatutReservation.VALIDEE, StatutReservation.EN_ATTENTE],
+            ).select_related('demandeur')
+            for r in a_venir:
+                notifier(r.demandeur, f'{instance.nom} indisponible',
+                         f"Le laboratoire {instance.nom} est momentanément indisponible. Votre réservation du "
+                         f"{r.date:%d/%m/%Y} ({r.heure_debut:%H:%M}-{r.heure_fin:%H:%M}) risque d'être compromise ; "
+                         "contactez le responsable ou annulez-la depuis « Mes réservations ».",
+                         TypeNotification.RESERVATION, r, email=True)
 
     def perform_destroy(self, instance):
         # CASCADE supprimerait équipements, réservations et consommables du

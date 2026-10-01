@@ -41,6 +41,28 @@ def envoyer_lien_reinitialisation_mdp(utilisateur, jeton: str):
     )
 
 
+def envoyer_lien_activation(utilisateur, jeton: str):
+    # Inscription libre : le lien prouve que l'adresse appartient bien à
+    # la personne qui s'inscrit ; le compte reste bloqué tant qu'il n'est
+    # pas cliqué.
+    lien = f'{settings.FRONTEND_URL}/activer-compte/{jeton}'
+    message = (
+        f'Bonjour {utilisateur.prenom},\n\n'
+        f'Merci pour votre inscription sur la plateforme UMRED.\n\n'
+        f'Cliquez sur ce lien pour confirmer votre adresse email et activer votre compte :\n{lien}\n\n'
+        f'Ce lien est valable 24 heures. Si vous n\'êtes pas à l\'origine de cette inscription, '
+        f'ignorez cet email : aucun compte ne sera activé.\n\n'
+        f"L'équipe UMRED"
+    )
+    send_mail(
+        subject='Confirmez votre adresse email UMRED',
+        message=message,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[utilisateur.email],
+        fail_silently=False,
+    )
+
+
 def revoquer_sessions(utilisateur):
     """
     Met sur liste noire tous les refresh tokens de l'utilisateur : après un

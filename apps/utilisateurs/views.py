@@ -10,16 +10,31 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from .serializers import (
     MonProfilUpdateSerializer, UmredTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer,
     UtilisateurSerializer, DefinirMotDePasseSerializer, ChangerMotDePasseSerializer, MotDePasseOublieSerializer,
-    verifier_robustesse,
+    ActiverCompteSerializer, verifier_robustesse,
 )
 
 from rest_framework import generics, mixins, permissions, status
 from rest_framework.response import Response
 from rest_framework import viewsets
 from apps.core.services import enregistrer as journaliser
-from .services import envoyer_lien_definition_mdp, envoyer_lien_reinitialisation_mdp, revoquer_sessions
+from apps.organisations.isolation import filtrer_par_organisation
+from .services import (
+    envoyer_lien_definition_mdp, envoyer_lien_reinitialisation_mdp, envoyer_lien_activation, revoquer_sessions,
+)
+
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
 
 logger = logging.getLogger(__name__)
+
+# Réponse type {"detail": "..."} des vues d'authentification, pour Swagger.
+REPONSE_DETAIL = inline_serializer('ReponseDetail', {'detail': drf_serializers.CharField()})
+
+# Jetons qui permettent de choisir un mot de passe. Un jeton de
+# vérification d'email ne sert qu'à activer le compte : il est refusé par
+# les vues de définition du mot de passe.
+MOTIFS_MOT_DE_PASSE = [MotifJeton.INVITATION, MotifJeton.REINITIALISATION]
 
 
 def _premier_message(erreurs):
@@ -50,6 +65,18 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
     queryset = Utilisateur.objects.all()
     permission_classes = [EstAdmin]
 
+    def get_permissions(self):
+        if self.action in ['mes_etudiants', 'encadrants']:
+            return [permissions.IsAuthenticated()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        qs = filtrer_par_organisation(Utilisateur.objects.all(), self.request.user).select_related('encadrant', 'organisation')
+        role = self.request.query_params.get('role')
+        if role:
+            qs = qs.filter(role=role)
+        return qs
+
     def get_serializer_class(self):
         return UtilisateurCreateSerializer if self.action == 'create' else UtilisateurSerializer
 
@@ -72,6 +99,9 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
             telephone=serializer.validated_data.get('telephone', ''),
             role=serializer.validated_data['role'],
             statut_academique=serializer.validated_data.get('statut_academique'),
+            encadrant=serializer.validated_data.get('encadrant'),
+            # Toujours l'établissement de l'admin, jamais lu dans la requête.
+            organisation=request.user.organisation,
         )
         utilisateur.activer_compte()
 
@@ -90,6 +120,20 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
         instance = serializer.save()
         journaliser(self.request.user, "Modification d'un compte utilisateur", instance)
 
+    @action(detail=False, methods=['get'])
+    def mes_etudiants(self, request):
+        """Les étudiants encadrés par l'enseignant-chercheur connecté."""
+        etudiants = request.user.etudiants_encadres.filter(statut_compte=StatutCompte.ACTIF)
+        return Response(UtilisateurSerializer(etudiants, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def encadrants(self, request):
+        """Enseignants-chercheurs actifs de l'établissement (liste légère pour les formulaires)."""
+        encadrants = filtrer_par_organisation(Utilisateur.objects.all(), request.user).filter(
+            role=Role.CHERCHEUR, statut_compte=StatutCompte.ACTIF,
+        )
+        return Response([{'id': u.id, 'nom_complet': u.nom_complet} for u in encadrants])
+
     @action(detail=True, methods=['post'])
     def activer(self, request, pk=None):
         utilisateur = self.get_object()
@@ -102,9 +146,13 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
         utilisateur = self.get_object()
         if utilisateur.id == request.user.id:
             raise DRFValidationError("Vous ne pouvez pas désactiver votre propre compte.")
+        from apps.reservations.services import annuler_reservations_futures
+
         utilisateur.desactiver_compte()
         revoquer_sessions(utilisateur)
-        journaliser(request.user, "Désactivation d'un compte", utilisateur)
+        annulees = annuler_reservations_futures(utilisateur)
+        journaliser(request.user, "Désactivation d'un compte", utilisateur,
+                    f'{annulees} réservation(s) à venir annulée(s)' if annulees else '')
         return Response(UtilisateurSerializer(utilisateur).data)
     
     
@@ -119,22 +167,39 @@ class RegisterView(generics.CreateAPIView):
     throttle_scope = 'auth'
 
     def create(self, request, *args, **kwargs):
+        """
+        Le compte est créé bloqué (EN_ATTENTE, is_active=False) et aucun
+        token n'est renvoyé : l'utilisateur doit d'abord cliquer le lien
+        d'activation reçu par email. On contrôle ainsi que l'adresse existe
+        et appartient bien à la personne qui s'inscrit.
+        """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
 
-        refresh = RefreshToken.for_user(user)
+        # Compte et jeton créés ensemble : pas de compte sans lien d'activation.
+        with transaction.atomic():
+            user = serializer.save()
+            jeton = JetonDefinitionMotDePasse.generer_pour(user, MotifJeton.VERIFICATION)
+        try:
+            envoyer_lien_activation(user, jeton.jeton)
+        except Exception:
+            # Le compte reste créé : l'utilisateur pourra redemander le lien
+            # (RenvoyerActivationView).
+            logger.exception("Échec d'envoi de l'email d'activation à %s", user.email)
+
+        journaliser(user, 'Inscription sur la plateforme', user)
         return Response({
-            'access': str(refresh.access_token),
-            'refresh': str(refresh),
-            'role': user.role,
-            'nom': user.nom,
-            'prenom': user.prenom,
+            'detail': f"Un email d'activation a été envoyé à {user.email}.",
+            'email': user.email,
         }, status=status.HTTP_201_CREATED)
 
 class LogoutView(generics.GenericAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        request=inline_serializer('Deconnexion', {'refresh': drf_serializers.CharField(required=False)}),
+        responses={205: None}, summary='Se déconnecter (le refresh token est mis sur liste noire)',
+    )
     def post(self, request):
         journaliser(request.user, 'Déconnexion de la plateforme', request.user)
         refresh = request.data.get('refresh')
@@ -151,9 +216,15 @@ class VerifierJetonView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = 'auth'
 
+    @extend_schema(
+        responses=inline_serializer('VerificationJeton', {
+            'valide': drf_serializers.BooleanField(), 'prenom': drf_serializers.CharField(required=False),
+        }),
+        summary="Vérifier un lien d'invitation ou de réinitialisation",
+    )
     def get(self, request, jeton):
         try:
-            objet_jeton = JetonDefinitionMotDePasse.objects.get(jeton=jeton)
+            objet_jeton = JetonDefinitionMotDePasse.objects.get(jeton=jeton, motif__in=MOTIFS_MOT_DE_PASSE)
         except JetonDefinitionMotDePasse.DoesNotExist:
             return Response({'valide': False}, status=404)
 
@@ -167,12 +238,16 @@ class DefinirMotDePasseView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = 'auth'
 
+    @extend_schema(request=DefinirMotDePasseSerializer, responses=REPONSE_DETAIL,
+                   summary='Choisir son mot de passe via un lien reçu par email')
     def post(self, request):
         serializer = DefinirMotDePasseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         try:
-            objet_jeton = JetonDefinitionMotDePasse.objects.get(jeton=serializer.validated_data['jeton'])
+            objet_jeton = JetonDefinitionMotDePasse.objects.get(
+                jeton=serializer.validated_data['jeton'], motif__in=MOTIFS_MOT_DE_PASSE
+            )
         except JetonDefinitionMotDePasse.DoesNotExist:
             return Response({'detail': 'Lien invalide.'}, status=404)
 
@@ -220,6 +295,14 @@ class ChangerMotDePasseView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'auth'
 
+    @extend_schema(
+        request=ChangerMotDePasseSerializer,
+        responses=inline_serializer('ChangementMotDePasse', {
+            'detail': drf_serializers.CharField(), 'access': drf_serializers.CharField(),
+            'refresh': drf_serializers.CharField(),
+        }),
+        summary='Changer son mot de passe (renvoie une nouvelle paire de tokens)',
+    )
     def post(self, request):
         serializer = ChangerMotDePasseSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
@@ -253,6 +336,8 @@ class MotDePasseOublieView(APIView):
     MESSAGE = ("Si un compte actif correspond à cette adresse, un email de "
                "réinitialisation vient d'être envoyé.")
 
+    @extend_schema(request=MotDePasseOublieSerializer, responses=REPONSE_DETAIL,
+                   summary='Demander un lien de réinitialisation du mot de passe')
     def post(self, request):
         serializer = MotDePasseOublieSerializer(data=request.data)
         if not serializer.is_valid():
@@ -274,4 +359,90 @@ class MotDePasseOublieView(APIView):
         # Réponse IDENTIQUE que le compte existe ou non : sinon ce formulaire
         # permettrait à n'importe qui de tester quels emails sont inscrits
         # (énumération de comptes).
+        return Response({'detail': self.MESSAGE})
+
+
+class ActiverCompteView(APIView):
+    """
+    Confirmation de l'adresse email après une inscription libre : le lien
+    reçu par email pointe vers la page frontend /activer-compte/<jeton>,
+    qui appelle cet endpoint.
+    """
+    permission_classes = [permissions.AllowAny]
+    # Aucune authentification : un vieux token resté dans le navigateur ne
+    # doit pas faire échouer l'activation en 401.
+    authentication_classes = []
+    throttle_scope = 'auth'
+
+    @extend_schema(
+        request=ActiverCompteSerializer,
+        responses=inline_serializer('ActivationCompte', {
+            'detail': drf_serializers.CharField(), 'deja_active': drf_serializers.BooleanField(),
+        }),
+        summary="Activer son compte via le lien reçu après l'inscription",
+    )
+    def post(self, request):
+        serializer = ActiverCompteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        objet_jeton = JetonDefinitionMotDePasse.objects.select_related('utilisateur').filter(
+            jeton=serializer.validated_data['jeton'], motif=MotifJeton.VERIFICATION,
+        ).first()
+        if not objet_jeton:
+            return Response({'detail': "Lien d'activation invalide."}, status=404)
+
+        utilisateur = objet_jeton.utilisateur
+        # Double clic sur le lien, ou lien ouvert au préalable par l'antivirus
+        # de la messagerie : le compte est déjà actif, ce n'est pas une erreur.
+        if utilisateur.statut_compte == StatutCompte.ACTIF:
+            return Response({'detail': 'Votre compte est déjà activé.', 'deja_active': True})
+        # Un compte désactivé par l'admin entre-temps ne se réactive pas
+        # avec son ancien lien d'inscription.
+        if utilisateur.statut_compte != StatutCompte.EN_ATTENTE:
+            return Response({'detail': 'Ce compte a été désactivé. Contactez un administrateur.'}, status=400)
+        if not objet_jeton.est_valide():
+            return Response({'detail': "Ce lien d'activation a expiré."}, status=400)
+
+        # Le jeton est marqué utilisé dans la même transaction que
+        # l'activation : un même lien ne peut servir qu'une fois.
+        with transaction.atomic():
+            utilisateur.activer_compte()
+            objet_jeton.utilise = True
+            objet_jeton.save(update_fields=['utilise'])
+
+        journaliser(utilisateur, "Activation du compte par email", utilisateur)
+        return Response({'detail': 'Votre compte est activé. Vous pouvez vous connecter.', 'deja_active': False})
+
+
+class RenvoyerActivationView(APIView):
+    """
+    Renvoie un lien d'activation (lien expiré, email perdu ou non reçu).
+    Générer un nouveau jeton invalide le précédent.
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_scope = 'auth'
+
+    MESSAGE = ("Si un compte en attente d'activation correspond à cette adresse, "
+               "un nouvel email d'activation vient d'être envoyé.")
+
+    @extend_schema(request=MotDePasseOublieSerializer, responses=REPONSE_DETAIL,
+                   summary="Renvoyer l'email d'activation")
+    def post(self, request):
+        serializer = MotDePasseOublieSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({'detail': _premier_message(serializer.errors)}, status=400)
+
+        utilisateur = Utilisateur.objects.filter(
+            email__iexact=serializer.validated_data['email'], statut_compte=StatutCompte.EN_ATTENTE,
+        ).first()
+
+        if utilisateur:
+            jeton = JetonDefinitionMotDePasse.generer_pour(utilisateur, MotifJeton.VERIFICATION)
+            try:
+                envoyer_lien_activation(utilisateur, jeton.jeton)
+            except Exception:
+                logger.exception("Échec d'envoi de l'email d'activation à %s", utilisateur.email)
+
+        # Même réponse dans tous les cas (pas d'énumération de comptes).
         return Response({'detail': self.MESSAGE})

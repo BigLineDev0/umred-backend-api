@@ -14,6 +14,7 @@ class NotificationPagination(PageNumberPagination):
 
 
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Notification.objects.none()  # pour Swagger ; le vrai queryset est get_queryset()
     serializer_class = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = NotificationPagination

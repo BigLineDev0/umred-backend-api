@@ -1,9 +1,12 @@
 from rest_framework import serializers
+from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Equipement
 
 
-class EquipementSerializer(serializers.ModelSerializer):
+class EquipementSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
+    champs_organisation = {'laboratoire': 'organisation'}
     laboratoire_nom = serializers.CharField(source='laboratoire.nom', read_only=True)
+    nombre_utilisations = serializers.SerializerMethodField()
 
     class Meta:
         model = Equipement
@@ -11,10 +14,17 @@ class EquipementSerializer(serializers.ModelSerializer):
             'id', 'laboratoire', 'laboratoire_nom', 'nom', 'description',
             'marque', 'modele', 'numero_serie', 'date_acquisition', 'statut', 'date_creation',
             'instructions_utilisation', 'consignes_securite', 'manuel_pdf',
-            'necessite_validation', 'seuil_heures_maintenance', 'categorie'
+            'necessite_validation', 'seuil_heures_maintenance', 'categorie', 'nombre_utilisations',
         ]
         read_only_fields = ['date_creation']
         
+    def get_nombre_utilisations(self, obj) -> int:
+        # Valeur annotée par EquipementViewSet quand elle existe.
+        if hasattr(obj, 'nb_utilisations'):
+            return obj.nb_utilisations
+        from apps.reservations.models import STATUTS_BLOQUANTS
+        return obj.reservations.filter(statut__in=STATUTS_BLOQUANTS).count()
+
     def validate_manuel_pdf(self, value):
         if value and value.size > 10 * 1024 * 1024:
             raise serializers.ValidationError("Le fichier ne doit pas dépasser 10 Mo.")

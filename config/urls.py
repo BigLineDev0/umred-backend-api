@@ -6,6 +6,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from apps.utilisateurs.views import ChangerMotDePasseView, LogoutView, MonProfilView
 
 from apps.utilisateurs.views import RegisterView, UmredTokenObtainPairView, VerifierJetonView, DefinirMotDePasseView, MotDePasseOublieView
+from apps.utilisateurs.views import ActiverCompteView, RenvoyerActivationView
 
 
 from django.conf import settings
@@ -18,6 +19,8 @@ urlpatterns = [
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/register/', RegisterView.as_view(), name='register'),
     path('api/auth/logout/', LogoutView.as_view(), name='logout'),
+    path('api/auth/activer-compte/', ActiverCompteView.as_view(), name='activer-compte'),
+    path('api/auth/renvoyer-activation/', RenvoyerActivationView.as_view(), name='renvoyer-activation'),
     
     path('api/auth/verifier-jeton/<str:jeton>/', VerifierJetonView.as_view(), name='verifier-jeton'),
     path('api/auth/definir-mot-de-passe/', DefinirMotDePasseView.as_view(), name='definir-mot-de-passe'),
@@ -36,6 +39,7 @@ urlpatterns = [
     
     path('api/consommables/', include('apps.consommables.urls')),
     path('api/projets/', include('apps.projets.urls')),
+    path('api/organisations/', include('apps.organisations.urls')),
     
 ]
 

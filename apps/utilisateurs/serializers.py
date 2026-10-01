@@ -6,7 +6,9 @@ from .models import StatutCompte
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from rest_framework import serializers
+from rest_framework import exceptions, serializers
+from apps.organisations.isolation import ChampsOrganisationMixin, est_super_admin
+from apps.organisations.models import Organisation
 from .models import Utilisateur, Role
 
 
@@ -41,6 +43,7 @@ class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['role'] = user.role  # accessible par FastAPI sans rappeler Django
         token['prenom'] = user.prenom
         token['nom'] = user.nom
+        token['organisation'] = user.organisation_id
         return token
     
     def validate(self, attrs):
@@ -48,12 +51,25 @@ class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
         # tokens ; un compte désactivé (is_active=False) y est déjà refusé.
         # On ajoute ensuite une règle métier : un compte non ACTIF (ex. EN_ATTENTE)
         # ne peut pas se connecter, même avec le bon mot de passe.
-        data = super().validate(attrs)
+        # simplejwt lève l'AuthenticationFailed de DRF (classe parente de
+        # la sienne) : c'est donc celle-là qu'il faut intercepter.
+        try:
+            data = super().validate(attrs)
+        except exceptions.AuthenticationFailed:
+            self._refuser_si_email_non_verifie(attrs)
+            raise
 
         if self.user.statut_compte != StatutCompte.ACTIF:
             raise AuthenticationFailed(
                 "Ce compte n'est pas encore actif. Contactez un administrateur.",
                 code='compte_inactif'
+            )
+        # Abonnement suspendu par l'éditeur : tout l'établissement est bloqué.
+        organisation = self.user.organisation
+        if not est_super_admin(self.user) and organisation is not None and not organisation.est_active:
+            raise AuthenticationFailed(
+                "L'accès de votre établissement à la plateforme est suspendu.",
+                code='organisation_suspendue'
             )
 
         update_last_login(None, self.user)
@@ -63,15 +79,35 @@ class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['nom'] = self.user.nom
         data['prenom'] = self.user.prenom
         data['photo'] = self.user.photo.url if self.user.photo else None
+        data['organisation'] = self.user.organisation_id
         return data
-    
+
+    def _refuser_si_email_non_verifie(self, attrs):
+        # Un compte inscrit mais pas encore confirmé a is_active=False :
+        # simplejwt le refuse avec le message générique « identifiants
+        # invalides ». On donne un message précis (et un code que le
+        # frontend reconnaît pour proposer de renvoyer l'email), mais
+        # seulement si le mot de passe est correct : sinon ce message
+        # révélerait qu'un compte existe pour cette adresse.
+        utilisateur = Utilisateur.objects.filter(
+            email__iexact=attrs.get(self.username_field, ''), statut_compte=StatutCompte.EN_ATTENTE,
+        ).first()
+        if utilisateur and utilisateur.check_password(attrs.get('password', '')):
+            raise AuthenticationFailed(
+                "Votre adresse email n'a pas encore été confirmée. "
+                "Cliquez sur le lien d'activation reçu par email.",
+                code='email_non_verifie'
+            )
+
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
+    # L'étudiant choisit son établissement parmi ceux qui sont actifs.
+    organisation = serializers.PrimaryKeyRelatedField(queryset=Organisation.objects.filter(est_active=True))
 
     class Meta:
         model = Utilisateur
-        fields = ['nom', 'prenom', 'email', 'password']
+        fields = ['nom', 'prenom', 'email', 'password', 'organisation']
 
     def validate_email(self, value):
         return verifier_email_unique(value)
@@ -90,26 +126,66 @@ class RegisterSerializer(serializers.ModelSerializer):
             password=validated_data['password'],
             nom=validated_data['nom'],
             prenom=validated_data['prenom'],
+            organisation=validated_data['organisation'],
             role=Role.ETUDIANT,   # jamais fourni par le client, toujours forcé ici
+            # Compte bloqué jusqu'à la confirmation de l'adresse email
+            # (voir ActiverCompteView) : is_active=False empêche toute
+            # connexion, statut EN_ATTENTE l'affiche côté admin.
+            statut_compte=StatutCompte.EN_ATTENTE,
+            is_active=False,
         )
         
-class UtilisateurSerializer(serializers.ModelSerializer):
+def verifier_encadrant(attrs, instance=None):
+    """Seul un étudiant a un encadrant, et c'est un enseignant-chercheur."""
+    role = attrs.get('role', getattr(instance, 'role', None))
+    encadrant = attrs.get('encadrant', getattr(instance, 'encadrant', None))
+    if encadrant is None:
+        return attrs
+    if role != Role.ETUDIANT:
+        raise serializers.ValidationError({'encadrant': "Seul un étudiant peut être rattaché à un encadrant."})
+    if encadrant.role != Role.CHERCHEUR:
+        raise serializers.ValidationError({'encadrant': "L'encadrant doit être un enseignant-chercheur."})
+    return attrs
+
+
+# Un admin ne crée jamais de super-admin : ce rôle est réservé à l'éditeur.
+ROLES_ETABLISSEMENT = [(r.value, r.label) for r in Role if r != Role.SUPER_ADMIN]
+
+
+class UtilisateurSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
+    champs_organisation = {'encadrant': 'organisation'}
+    encadrant_nom = serializers.CharField(source='encadrant.nom_complet', read_only=True, allow_null=True)
+    organisation_nom = serializers.CharField(source='organisation.nom', read_only=True, allow_null=True)
+    role = serializers.ChoiceField(choices=ROLES_ETABLISSEMENT)
+
     class Meta:
         model = Utilisateur
-        fields = ['id', 'nom', 'prenom', 'email', 'telephone', 'role', 'photo', 'statut_compte', 'statut_academique', 'date_creation', 'last_login']
-        read_only_fields = ['statut_compte', 'date_creation', 'last_login']
+        fields = [
+            'id', 'nom', 'prenom', 'email', 'telephone', 'role', 'photo', 'statut_compte', 'statut_academique',
+            'encadrant', 'encadrant_nom', 'organisation', 'organisation_nom', 'date_creation', 'last_login',
+        ]
+        read_only_fields = ['statut_compte', 'organisation', 'date_creation', 'last_login']
 
     def validate_email(self, value):
         return verifier_email_unique(value, self.instance)
 
+    def validate(self, attrs):
+        return verifier_encadrant(attrs, self.instance)
 
-class UtilisateurCreateSerializer(serializers.ModelSerializer):
+
+class UtilisateurCreateSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
+    champs_organisation = {'encadrant': 'organisation'}
+    role = serializers.ChoiceField(choices=ROLES_ETABLISSEMENT)
+
     class Meta:
         model = Utilisateur
-        fields = ['nom', 'prenom', 'email', 'telephone', 'role', 'statut_academique']
+        fields = ['nom', 'prenom', 'email', 'telephone', 'role', 'statut_academique', 'encadrant']
 
     def validate_email(self, value):
         return verifier_email_unique(value)
+
+    def validate(self, attrs):
+        return verifier_encadrant(attrs)
 
 
 class DefinirMotDePasseSerializer(serializers.Serializer):
@@ -136,6 +212,10 @@ class ChangerMotDePasseSerializer(serializers.Serializer):
 
 class MotDePasseOublieSerializer(serializers.Serializer):
     email = serializers.EmailField()
+
+
+class ActiverCompteSerializer(serializers.Serializer):
+    jeton = serializers.CharField()
     
     
 class MonProfilUpdateSerializer(serializers.ModelSerializer):

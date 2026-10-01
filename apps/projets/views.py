@@ -1,4 +1,5 @@
 from rest_framework import viewsets, permissions
+from apps.organisations.isolation import filtrer_par_organisation
 from apps.utilisateurs.models import Role
 from .models import Projet
 from .serializers import ProjetSerializer, ProjetCreateSerializer
@@ -29,8 +30,14 @@ class ProjetViewSet(viewsets.ModelViewSet):
         return ProjetCreateSerializer if self.action == 'create' else ProjetSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        return qs if self.request.user.role == Role.ADMIN else qs.filter(responsable=self.request.user)
+        from django.db.models import Q
+
+        user = self.request.user
+        qs = filtrer_par_organisation(super().get_queryset(), user, 'responsable__organisation')
+        if user.role == Role.ADMIN:
+            return qs
+        # Un étudiant voit aussi les projets de son encadrant (pour y rattacher ses réservations).
+        return qs.filter(Q(responsable=user) | Q(responsable_id=user.encadrant_id) if user.encadrant_id else Q(responsable=user))
 
     def perform_create(self, serializer):
         # Le responsable est toujours l'utilisateur connecté (jamais lu dans

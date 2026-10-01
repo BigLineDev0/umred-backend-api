@@ -9,8 +9,8 @@ from apps.utilisateurs.models import Role
 from django.db.models import Q
 from rest_framework.pagination import PageNumberPagination
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from apps.reservations.models import Reservation
@@ -18,8 +18,20 @@ from apps.laboratoires.models import Laboratoire
 
 from datetime import datetime
 from .utils import lire_date, lire_id
+from .analytique import calculer_indicateurs
+from .rapport_pdf import generer_rapport_pdf
+from apps.organisations.isolation import filtrer_par_organisation
 
 import openpyxl
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+
+# Filtres communs des rapports et du pilotage, documentés dans Swagger.
+PARAMETRES_PERIODE = [
+    OpenApiParameter('date_debut', OpenApiTypes.DATE, description='Début de période (AAAA-MM-JJ)'),
+    OpenApiParameter('date_fin', OpenApiTypes.DATE, description='Fin de période (AAAA-MM-JJ)'),
+    OpenApiParameter('laboratoire', OpenApiTypes.INT, description='Restreindre à un laboratoire'),
+]
 from openpyxl.styles import Font, PatternFill
 
 ROLE_LABELS = {
@@ -47,7 +59,7 @@ class JournalActiviteViewSet(viewsets.ReadOnlyModelViewSet):
     pagination_class = JournalPagination
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = filtrer_par_organisation(super().get_queryset(), self.request.user, 'auteur__organisation')
         qs = qs.select_related('auteur', 'entite_type')
         auteur_id = lire_id(self.request, 'auteur')
         action = self.request.query_params.get('action')
@@ -71,6 +83,8 @@ class JournalActiviteViewSet(viewsets.ReadOnlyModelViewSet):
         return qs
     
     
+@extend_schema(parameters=[OpenApiParameter('q', OpenApiTypes.STR, description='Terme recherché (2 caractères min.)')],
+               responses=OpenApiTypes.OBJECT, summary='Recherche globale (équipements, laboratoires)')
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def recherche_globale(request):
@@ -78,14 +92,16 @@ def recherche_globale(request):
     if len(terme) < 2:
         return Response({'equipements': [], 'laboratoires': []})
 
-    equipements = Equipement.objects.filter(nom__icontains=terme).select_related('laboratoire')[:5]
-    laboratoires = Laboratoire.objects.filter(nom__icontains=terme)[:5]
+    equipements = filtrer_par_organisation(Equipement.objects.all(), request.user, 'laboratoire__organisation')
+    equipements = equipements.filter(nom__icontains=terme).select_related('laboratoire')[:5]
+    laboratoires = filtrer_par_organisation(Laboratoire.objects.all(), request.user).filter(nom__icontains=terme)[:5]
 
     return Response({
         'equipements': [{'id': e.id, 'nom': e.nom, 'laboratoire_nom': e.laboratoire.nom} for e in equipements],
         'laboratoires': [{'id': l.id, 'nom': l.nom, 'localisation': l.localisation} for l in laboratoires],
     })
     
+@extend_schema(responses=JournalActiviteSerializer(many=True), summary='Mes 10 dernières actions')
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def mon_activite(request):
@@ -118,6 +134,8 @@ def _duree_heures(reservation):
     return (fin - debut).total_seconds() / 3600
 
 
+@extend_schema(parameters=PARAMETRES_PERIODE, responses={(200, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'): OpenApiTypes.BINARY},
+               summary="Rapport d'activité Excel (admin)")
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def rapports_export_excel(request):
@@ -131,7 +149,8 @@ def rapports_export_excel(request):
     date_fin = lire_date(request, 'date_fin')
     laboratoire_id = lire_id(request, 'laboratoire')
 
-    reservations = Reservation.objects.exclude(est_archivee=True)
+    reservations = filtrer_par_organisation(Reservation.objects.all(), request.user, 'laboratoire__organisation')
+    reservations = reservations.exclude(est_archivee=True)
     if date_debut:
         reservations = reservations.filter(date__gte=date_debut)
     if date_fin:
@@ -228,3 +247,89 @@ def rapports_export_excel(request):
     response['Content-Disposition'] = f'attachment; filename="rapport_umred_labo_{datetime.now():%Y%m%d}.xlsx"'
     wb.save(response)
     return response
+
+ROLES_PILOTAGE = [Role.ADMIN, Role.TECHNICIEN]
+
+
+@extend_schema(parameters=PARAMETRES_PERIODE, responses=OpenApiTypes.OBJECT,
+               summary="Aide à la décision : indicateurs, prévision et recommandations")
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def indicateurs_pilotage(request):
+    """
+    Aide à la décision : occupation, heures de pointe, prévision de charge
+    et recommandations motivées (voir apps.core.analytique).
+    """
+    if request.user.role not in ROLES_PILOTAGE:
+        return Response({'detail': "Réservé aux administrateurs et techniciens."}, status=403)
+    return Response(calculer_indicateurs(
+        request.user, lire_date(request, 'date_debut'), lire_date(request, 'date_fin'), lire_id(request, 'laboratoire'),
+    ))
+
+
+@extend_schema(parameters=PARAMETRES_PERIODE, responses={(200, 'application/pdf'): OpenApiTypes.BINARY},
+               summary="Rapport d'activité PDF (admin)")
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def rapports_export_pdf(request):
+    if request.user.role != Role.ADMIN:
+        return Response({'detail': "Seul un administrateur peut exporter ce rapport."}, status=403)
+
+    date_debut = lire_date(request, 'date_debut')
+    date_fin = lire_date(request, 'date_fin')
+    laboratoire_id = lire_id(request, 'laboratoire')
+    indicateurs = calculer_indicateurs(request.user, date_debut, date_fin, laboratoire_id)
+
+    reservations = filtrer_par_organisation(Reservation.objects.all(), request.user, 'laboratoire__organisation').filter(
+        date__gte=indicateurs['periode']['debut'], date__lte=indicateurs['periode']['fin'],
+    ).exclude(est_archivee=True)
+    laboratoire_nom = None
+    if laboratoire_id:
+        reservations = reservations.filter(laboratoire_id=laboratoire_id)
+        labo = filtrer_par_organisation(Laboratoire.objects.all(), request.user).filter(id=laboratoire_id).first()
+        laboratoire_nom = labo.nom if labo else None
+    reservations = list(reservations.select_related('laboratoire', 'demandeur').prefetch_related('equipements')
+                        .order_by('date', 'heure_debut'))
+
+    contenu = generer_rapport_pdf(indicateurs, reservations, request.user.organisation, laboratoire_nom)
+    response = HttpResponse(contenu, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="rapport_activite_{datetime.now():%Y%m%d}.pdf"'
+    return response
+
+
+# --- Tâches planifiées déclenchées par l'automatisation (n8n) ---
+# Sur un hébergement sans cron (ex. Render gratuit), le workflow n8n appelle
+# ces URL à intervalle régulier. Elles ne sont pas liées à un utilisateur :
+# elles exigent l'en-tête « X-Taches-Token » égal au secret TACHES_TOKEN.
+# Sans secret configuré, elles sont désactivées (403).
+
+def _jeton_taches_valide(request):
+    import hmac
+    from django.conf import settings
+    attendu = settings.TACHES_TOKEN
+    recu = request.headers.get('X-Taches-Token', '')
+    # compare_digest : comparaison en temps constant (pas de fuite par le chronométrage).
+    return bool(attendu) and hmac.compare_digest(recu, attendu)
+
+
+@extend_schema(parameters=[OpenApiParameter('X-Taches-Token', OpenApiTypes.STR, OpenApiParameter.HEADER, required=True, description='Secret TACHES_TOKEN')], request=None, responses=OpenApiTypes.OBJECT, summary='Tâche planifiée : clôturer les réservations passées (n8n)')
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def tache_cloturer_reservations(request):
+    if not _jeton_taches_valide(request):
+        return Response({'detail': 'Jeton de tâche invalide.'}, status=403)
+    from apps.reservations.services import marquer_terminees
+    terminees, expirees = marquer_terminees()
+    return Response({'terminees': terminees, 'expirees': expirees})
+
+
+@extend_schema(parameters=[OpenApiParameter('X-Taches-Token', OpenApiTypes.STR, OpenApiParameter.HEADER, required=True, description='Secret TACHES_TOKEN')], request=None, responses=OpenApiTypes.OBJECT, summary='Tâche planifiée : synthèse hebdomadaire aux admins (n8n)')
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def tache_synthese_hebdomadaire(request):
+    if not _jeton_taches_valide(request):
+        return Response({'detail': 'Jeton de tâche invalide.'}, status=403)
+    from apps.core.management.commands.envoyer_synthese_hebdomadaire import envoyer_syntheses
+    return Response({'syntheses_envoyees': envoyer_syntheses()})

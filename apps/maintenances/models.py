@@ -2,6 +2,7 @@ from django.conf import settings
 from django.db import models, transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from datetime import timedelta
 from apps.equipements.models import Equipement, StatutEquipement
 
 
@@ -32,9 +33,13 @@ class Maintenance(models.Model):
       (SIGNALEE peut aussi être démarrée directement si un technicien est assigné)
       Tout état actif --annuler--> ANNULEE
 
-    Le statut de l'équipement suit la maintenance : EN_PANNE au
-    signalement, EN_MAINTENANCE à la planification, DISPONIBLE à la
-    clôture. Chaque transition vérifie l'état de départ et lève une
+    Le statut de l'équipement suit la maintenance : EN_PANNE dès le
+    signalement d'une panne, EN_MAINTENANCE pendant l'intervention
+    (EN_COURS), DISPONIBLE à la clôture. Une préventive simplement
+    PLANIFIÉE n'immobilise pas l'équipement : seule sa journée
+    d'intervention est fermée aux réservations (voir jour_bloque).
+    Les réservations déjà prises ce jour-là sont prévenues à la
+    planification. Chaque transition vérifie l'état de départ et lève une
     ValidationError si elle n'est pas autorisée.
 
     Un équipement peut avoir plusieurs maintenances actives en même temps
@@ -82,8 +87,9 @@ class Maintenance(models.Model):
     def _recalculer_statut_equipement(self):
         """
         Priorité : une panne (maintenance corrective active) l'emporte sur
-        une maintenance préventive ; sans maintenance active, l'équipement
-        redevient disponible. Un équipement HORS_SERVICE (retiré du parc
+        une intervention en cours ; sans panne ni intervention en cours,
+        l'équipement est disponible (une préventive planifiée plus tard ne
+        l'immobilise pas dès aujourd'hui). Un équipement HORS_SERVICE (retiré du parc
         par décision humaine) n'est jamais modifié automatiquement.
         """
         equipement = self.equipement
@@ -92,7 +98,7 @@ class Maintenance(models.Model):
         actives = equipement.maintenances.filter(statut__in=STATUTS_ACTIFS)
         if actives.filter(type=TypeMaintenance.CORRECTIVE).exists():
             nouveau = StatutEquipement.EN_PANNE
-        elif actives.exists():
+        elif actives.filter(statut=StatutMaintenance.EN_COURS).exists():
             nouveau = StatutEquipement.EN_MAINTENANCE
         else:
             nouveau = StatutEquipement.DISPONIBLE
@@ -101,13 +107,21 @@ class Maintenance(models.Model):
 
     # --- Création ---
 
+    @classmethod
+    def jour_bloque(cls, equipements_ids, jour):
+        """Une maintenance planifiée ou en cours ferme la journée aux réservations."""
+        return cls.objects.filter(
+            equipement_id__in=equipements_ids, date_planifiee__date=jour,
+            statut__in=[StatutMaintenance.PLANIFIEE, StatutMaintenance.EN_COURS],
+        ).select_related('equipement')
+
     def planifier(self):
         """
-        Planifie une maintenance et immobilise l'équipement dès maintenant
-        (EN_MAINTENANCE, ou EN_PANNE s'il a aussi une panne en cours) : choix
-        prudent pour qu'aucune réservation ne soit acceptée sur un créneau
-        où le technicien interviendra.
+        Planifie une maintenance. L'équipement reste réservable jusqu'au
+        jour de l'intervention, qui est fermé aux réservations.
         """
+        if self.date_planifiee < timezone.now() - timedelta(minutes=5):
+            raise ValidationError("La date planifiée est déjà passée.")
         self.full_clean()
         with transaction.atomic():
             self.statut = StatutMaintenance.PLANIFIEE
@@ -148,9 +162,12 @@ class Maintenance(models.Model):
             raise ValidationError("Seule une maintenance planifiée ou signalée peut être démarrée.")
         if self.statut == StatutMaintenance.SIGNALEE and not self.technicien:
             raise ValidationError("Assignez d'abord un technicien avant de démarrer.")
-        self.statut = StatutMaintenance.EN_COURS
-        self.date_debut = timezone.now()
-        self.save(update_fields=['statut', 'date_debut'])
+        with transaction.atomic():
+            self.statut = StatutMaintenance.EN_COURS
+            self.date_debut = timezone.now()
+            self.save(update_fields=['statut', 'date_debut'])
+            # Corrigé : l'équipement n'était jamais basculé EN_MAINTENANCE au démarrage.
+            self._recalculer_statut_equipement()
 
     def cloturer(self, rapport):
         if self.statut not in [StatutMaintenance.PLANIFIEE, StatutMaintenance.EN_COURS]:
@@ -178,6 +195,8 @@ class Maintenance(models.Model):
     def prendre_en_charge(self, technicien, date_planifiee):
         if self.statut != StatutMaintenance.SIGNALEE:
             raise ValidationError("Seule une panne signalée peut être prise en charge.")
+        if date_planifiee < timezone.now() - timedelta(minutes=5):
+            raise ValidationError("La date d'intervention est déjà passée.")
         self.technicien = technicien
         self.date_planifiee = date_planifiee
         self.statut = StatutMaintenance.PLANIFIEE

@@ -1,7 +1,9 @@
+from django.db.models import Count, Q
 from rest_framework.decorators import action
 from rest_framework import viewsets, permissions, filters
 
-from apps.equipements.services import evaluer_usure
+from apps.equipements.services import evaluer_usure, statistiques_equipement
+from apps.organisations.isolation import filtrer_par_organisation
 from .models import Equipement
 from .serializers import EquipementSerializer
 from apps.utilisateurs.models import Role
@@ -28,7 +30,14 @@ class EquipementViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related('laboratoire')
+        from apps.reservations.models import STATUTS_BLOQUANTS
+
+        qs = filtrer_par_organisation(super().get_queryset(), self.request.user, 'laboratoire__organisation')
+        # Nombre d'utilisations (réservations acquises), calculé par la base
+        # en une seule requête pour toute la liste.
+        qs = qs.select_related('laboratoire__organisation').annotate(
+            nb_utilisations=Count('reservations', filter=Q(reservations__statut__in=STATUTS_BLOQUANTS), distinct=True),
+        )
         laboratoire_id = lire_id(self.request, 'laboratoire')
         statut = self.request.query_params.get('statut')
         
@@ -43,8 +52,19 @@ class EquipementViewSet(viewsets.ModelViewSet):
         journaliser(self.request.user, "Création d'équipement", instance)
 
     def perform_update(self, serializer):
+        from apps.reservations.models import STATUTS_EQUIPEMENT_NON_RESERVABLES
+        from apps.equipements.services import prevenir_indisponibilite, reservations_impactees
+
+        ancien_statut = serializer.instance.statut
         instance = serializer.save()
         journaliser(self.request.user, "Modification d'équipement", instance)
+        # Passage manuel à « hors service » (ou panne) : les réservations à
+        # venir sont compromises, leurs demandeurs doivent le savoir.
+        if instance.statut != ancien_statut and instance.statut in STATUTS_EQUIPEMENT_NON_RESERVABLES:
+            prevenir_indisponibilite(
+                instance, reservations_impactees(instance),
+                f"{instance.nom} est désormais « {instance.get_statut_display().lower()} ».",
+            )
 
     def perform_destroy(self, instance):
         # on_delete=CASCADE effacerait aussi les maintenances de
@@ -75,6 +95,11 @@ class EquipementViewSet(viewsets.ModelViewSet):
         })
 
 
+    @action(detail=True, methods=['get'])
+    def statistiques(self, request, pk=None):
+        """Usage, fiabilité (MTBF/MTTR), prévision de maintenance et score de santé."""
+        return Response(statistiques_equipement(self.get_object()))
+
     @action(detail=False, methods=['get'])
     def alertes_usure_actives(self, request):
         """
@@ -82,7 +107,8 @@ class EquipementViewSet(viewsets.ModelViewSet):
         équipements ayant au moins une alerte active, triés par sévérité.
         """
         resultats = []
-        for e in Equipement.objects.exclude(statut='HORS_SERVICE').select_related('laboratoire'):
+        equipements = filtrer_par_organisation(Equipement.objects.all(), request.user, 'laboratoire__organisation')
+        for e in equipements.exclude(statut='HORS_SERVICE').select_related('laboratoire'):
             alerte = evaluer_usure(e)
             if alerte:
                 resultats.append({

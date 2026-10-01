@@ -1,10 +1,12 @@
 from decimal import Decimal
 
 from rest_framework import serializers
+from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Consommable, MouvementStock
 
 
-class ConsommableSerializer(serializers.ModelSerializer):
+class ConsommableSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
+    champs_organisation = {'laboratoire': 'organisation'}
     laboratoire_nom = serializers.CharField(source='laboratoire.nom', read_only=True)
     statut = serializers.CharField(read_only=True)
     peremption_proche = serializers.BooleanField(read_only=True)

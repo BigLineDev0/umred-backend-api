@@ -8,6 +8,12 @@ class StatutLaboratoire(models.TextChoices):
 
 
 class Laboratoire(models.Model):
+    # Racine de l'isolation SaaS : équipements, réservations, maintenances
+    # et consommables sont rattachés à l'organisation via leur laboratoire.
+    organisation = models.ForeignKey(
+        'organisations.Organisation', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='laboratoires'
+    )
     nom = models.CharField(max_length=150)
     description = models.TextField(blank=True)
     localisation = models.CharField(max_length=150)
