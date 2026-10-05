@@ -108,6 +108,29 @@ STORAGES = {
     },
 }
 
+# Fichiers envoyés (photos, logos, manuels PDF) sur un stockage compatible
+# S3 (Supabase Storage, Cloudflare R2, AWS...) dès que S3_BUCKET est défini.
+# Indispensable sur un hébergement au disque éphémère (Render gratuit) :
+# sans cela, les fichiers disparaissent à chaque redéploiement ou mise en veille.
+if env('S3_BUCKET', default=''):
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": env('S3_BUCKET'),
+            "endpoint_url": env('S3_ENDPOINT_URL'),
+            "access_key": env('S3_ACCESS_KEY_ID'),
+            "secret_key": env('S3_SECRET_ACCESS_KEY'),
+            "region_name": env('S3_REGION', default='auto'),
+            # Bucket public : URL directe et stable, sans signature qui expire.
+            # Ex. Supabase : <projet>.supabase.co/storage/v1/object/public/<bucket>
+            "custom_domain": env('S3_DOMAINE_PUBLIC', default=None),
+            "querystring_auth": False,
+            "file_overwrite": False,
+            "addressing_style": "path",
+            "signature_version": "s3v4",
+        },
+    }
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # --- Django REST Framework ---
@@ -162,6 +185,11 @@ EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
 EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='UMRED Labo <no-reply@umred.sn>')
+
+# Envoi par API HTTP (Brevo) : à utiliser là où les ports SMTP sont bloqués
+# (Render gratuit bloque 25, 465 et 587). Activé avec
+# EMAIL_BACKEND=anymail.backends.brevo.EmailBackend et BREVO_API_KEY.
+ANYMAIL = {'BREVO_API_KEY': env('BREVO_API_KEY', default='')}
 
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:4200')
 

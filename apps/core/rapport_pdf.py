@@ -62,7 +62,10 @@ def generer_rapport_pdf(indicateurs, reservations, organisation=None, laboratoir
     entete = []
     if organisation and organisation.logo:
         try:
-            entete.append(Image(organisation.logo.path, width=2.2 * cm, height=2.2 * cm, kind='proportional'))
+            # Lecture par le stockage (et non .path) : fonctionne aussi quand
+            # les fichiers sont sur un stockage distant (S3, Supabase...).
+            with organisation.logo.open('rb') as fichier:
+                entete.append(Image(BytesIO(fichier.read()), width=2.2 * cm, height=2.2 * cm, kind='proportional'))
         except Exception:
             pass  # logo illisible : le rapport reste générable sans lui
     periode = indicateurs['periode']
