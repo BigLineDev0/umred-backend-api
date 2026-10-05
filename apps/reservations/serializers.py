@@ -107,10 +107,6 @@ class AlerteCreneauSerializer(ChampsOrganisationMixin, serializers.ModelSerializ
         ]
         read_only_fields = ['active', 'date_creation', 'date_notification']
 
-    def get_annulable(self, obj) -> bool:
-        from .models import StatutReservation
-        return obj.statut in [StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE] and not obj.creneau_commence()
-
     def get_equipements_noms(self, obj) -> list[str]:
         return [e.nom for e in obj.equipements.all()]
 

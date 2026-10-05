@@ -113,7 +113,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # --- Django REST Framework ---
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # JWT + contrôle à chaque requête : compte actif, établissement non suspendu.
+        'apps.utilisateurs.authentication.JWTAuthenticationEtablissement',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -179,15 +180,25 @@ N8N_WEBHOOK_URL = env('N8N_WEBHOOK_URL', default='')
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Origines autorisées pour les formulaires POST (admin Django) servis
+# derrière un proxy : ex. http://localhost:8080 en Docker.
+CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
+
 # --- Sécurité production ---
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
+    # Redirection HTTPS par Django. À désactiver (SECURE_SSL_REDIRECT=False)
+    # quand un proxy fait déjà la redirection ou quand d'autres services
+    # appellent Django en HTTP interne (ex. le service IA dans Docker :
+    # http://backend:8000), sinon ces appels seraient redirigés et échoueraient.
+    SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
 
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
 
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    # Cookies réservés à HTTPS ; à désactiver uniquement pour un essai
+    # local en HTTP (sinon impossible de se connecter à l'admin Django).
+    SESSION_COOKIE_SECURE = env.bool('COOKIES_SECURISES', default=True)
+    CSRF_COOKIE_SECURE = env.bool('COOKIES_SECURISES', default=True)
 
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

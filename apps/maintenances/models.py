@@ -139,6 +139,10 @@ class Maintenance(models.Model):
         """
         if equipement.statut == StatutEquipement.HORS_SERVICE:
             raise ValidationError("Cet équipement est hors service : aucune panne ne peut y être signalée.")
+        # Une seule panne active par équipement : un second signalement
+        # créerait une intervention en double pour le même problème.
+        if equipement.maintenances.filter(type=TypeMaintenance.CORRECTIVE, statut__in=STATUTS_ACTIFS).exists():
+            raise ValidationError("Une panne est déjà signalée sur cet équipement : un technicien va intervenir.")
         maintenance = cls(
             equipement=equipement,
             type=TypeMaintenance.CORRECTIVE,

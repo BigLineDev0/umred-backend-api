@@ -162,7 +162,7 @@ def rapports_export_excel(request):
 
     wb = openpyxl.Workbook()
     entete_font = Font(bold=True, color="FFFFFF")
-    entete_fill = PatternFill(start_color="1848D9", end_color="1848D9", fill_type="solid")
+    entete_fill = PatternFill(start_color="1B2CC1", end_color="1B2CC1", fill_type="solid")
 
     def style_entete(ws):
         for cell in ws[ws.max_row]:
@@ -172,11 +172,12 @@ def rapports_export_excel(request):
     # --- Résumé ---
     ws = wb.active
     ws.title = "Résumé"
-    _ajouter_ligne(ws, ["Rapport d'activité — UMRED Labo"])
+    _ajouter_ligne(ws, ["Rapport d'activité — SenLab"])
     ws['A1'].font = Font(bold=True, size=14)
     _ajouter_ligne(ws, [f"Période : {date_debut or '—'} au {date_fin or '—'}"])
     if laboratoire_id:
-        labo = Laboratoire.objects.filter(id=laboratoire_id).first()
+        # Filtré par établissement : un id d'un autre établissement ne doit pas révéler son nom.
+        labo = filtrer_par_organisation(Laboratoire.objects.all(), request.user).filter(id=laboratoire_id).first()
         _ajouter_ligne(ws, [f"Laboratoire : {labo.nom if labo else '—'}"])
     _ajouter_ligne(ws, [])
     _ajouter_ligne(ws, ["Indicateur", "Valeur"])
@@ -244,7 +245,7 @@ def rapports_export_excel(request):
         ws5.column_dimensions[col].width = w
 
     response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    response['Content-Disposition'] = f'attachment; filename="rapport_umred_labo_{datetime.now():%Y%m%d}.xlsx"'
+    response['Content-Disposition'] = f'attachment; filename="rapport_senlab_{datetime.now():%Y%m%d}.xlsx"'
     wb.save(response)
     return response
 

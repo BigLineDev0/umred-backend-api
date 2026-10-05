@@ -39,3 +39,17 @@ class ExportExcelTests(APITestCase):
         ws = openpyxl.load_workbook(BytesIO(reponse.content))['Détail des réservations']
         cellule = ws['F2']
         self.assertEqual(cellule.data_type, 's')
+
+
+class SyntheseIAValidationTests(SimpleTestCase):
+    """Le texte renvoyé par le service IA n'est utilisé que s'il a la forme attendue."""
+
+    def test_synthese_correcte_acceptee(self):
+        from .management.commands.envoyer_synthese_hebdomadaire import synthese_valide
+        self.assertEqual(synthese_valide({'synthese': '  Semaine calme.  '}), 'Semaine calme.')
+
+    def test_reponses_invalides_refusees(self):
+        from .management.commands.envoyer_synthese_hebdomadaire import LONGUEUR_MAX_SYNTHESE, synthese_valide
+        for donnees in [None, [], {}, {'synthese': None}, {'synthese': 42}, {'synthese': '   '},
+                        {'synthese': 'x' * (LONGUEUR_MAX_SYNTHESE + 1)}]:
+            self.assertIsNone(synthese_valide(donnees), donnees)

@@ -40,7 +40,7 @@ python-dateutil==2.9.0.post0
 PyYAML==6.0.3
 redis==5.0.8
 referencing==0.37.0
-reportlab @ file:///tmp/claude-1000/rl/reportlab-5.0.1-py3-none-any.whl#sha256=1c36e6bb0e71780c72331eba60da7f602e8d4389a8723825af71342e49d791e8
+reportlab==5.0.1
 rpds-py==2026.6.3
 six==1.17.0
 sqlparse==0.6.0

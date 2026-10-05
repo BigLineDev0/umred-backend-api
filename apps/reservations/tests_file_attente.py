@@ -212,7 +212,7 @@ class LiberationCreneauTests(Base):
     def test_on_n_annule_pas_la_reservation_d_un_autre(self):
         validee = self.existante(self.etudiant, StatutReservation.VALIDEE)
         self.client.force_authenticate(self.encadrant)
-        self.assertEqual(self.client.post(f'/api/reservations/{validee.id}/annuler/').status_code, 400)
+        self.assertEqual(self.client.post(f'/api/reservations/{validee.id}/annuler/').status_code, 403)
 
     def test_cloture_automatique(self):
         hier = timezone.localdate() - timedelta(days=1)

@@ -10,7 +10,7 @@ from rest_framework.response import Response
 
 from apps.core.services import enregistrer as journaliser
 from apps.utilisateurs.models import JetonDefinitionMotDePasse, Role, StatutCompte, Utilisateur
-from apps.utilisateurs.services import envoyer_lien_definition_mdp
+from apps.utilisateurs.services import envoyer_lien_definition_mdp, revoquer_sessions
 
 from .isolation import est_super_admin
 from .models import Organisation
@@ -100,6 +100,10 @@ class OrganisationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         organisation = self.get_object()
         organisation.est_active = False
         organisation.save(update_fields=['est_active'])
+        # Les sessions ouvertes sont fermées : sans cela, les utilisateurs
+        # déjà connectés pourraient continuer à renouveler leur token.
+        for utilisateur in organisation.utilisateurs.all():
+            revoquer_sessions(utilisateur)
         journaliser(request.user, "Suspension d'un établissement", organisation)
         return Response(OrganisationPlateformeSerializer(self.get_queryset().get(pk=organisation.pk)).data)
 

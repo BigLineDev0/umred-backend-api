@@ -1,0 +1,23 @@
+# Le contexte de build ne doit contenir ni secrets, ni environnement local,
+# ni fichiers générés : image plus légère et aucune fuite du .env.
+.git
+.gitignore
+.venv
+venv
+env
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.coverage
+htmlcov
+.env
+.env.*
+!.env.example
+media
+staticfiles
+db.sqlite3
+.claude
+.vscode
+.idea
+docker-compose.yml
+Dockerfile

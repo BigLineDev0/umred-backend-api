@@ -75,6 +75,7 @@ class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
         update_last_login(None, self.user)
         journaliser(self.user, 'Connexion à la plateforme', self.user)
 
+        data['id'] = self.user.id
         data['role'] = self.user.role
         data['nom'] = self.user.nom
         data['prenom'] = self.user.prenom

@@ -3,6 +3,7 @@ import logging
 from django.db import transaction
 from rest_framework.decorators import APIView, action
 from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.utilisateurs.models import Role, Utilisateur, JetonDefinitionMotDePasse, MotifJeton, StatutCompte
@@ -206,8 +207,9 @@ class LogoutView(generics.GenericAPIView):
         if refresh:
             try:
                 RefreshToken(refresh).blacklist()
-            except Exception:
-                pass  # blacklist non configuré : la déconnexion reste journalisée quand même
+            except TokenError:
+                # Token déjà expiré ou révoqué : la session est de toute façon close.
+                pass
         return Response(status=status.HTTP_205_RESET_CONTENT)
     
     

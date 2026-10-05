@@ -4,7 +4,7 @@ from rest_framework import viewsets, mixins, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
-from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
 from django.utils import timezone
 
 from apps.core.services import enregistrer as journaliser
@@ -423,7 +423,7 @@ class ReservationViewSet(viewsets.ModelViewSet):
         # Le demandeur annule sa réservation ; un technicien ou un admin peut
         # annuler celle d'un autre (ex. fermeture exceptionnelle du labo).
         if reservation.demandeur_id != user.id and user.role not in [Role.TECHNICIEN, Role.ADMIN]:
-            raise DRFValidationError("Vous ne pouvez annuler que vos propres réservations.")
+            raise PermissionDenied("Vous ne pouvez annuler que vos propres réservations.")
         try:
             liberait_creneau = reservation.annuler()
         except DjangoValidationError as e:

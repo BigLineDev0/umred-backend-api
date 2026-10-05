@@ -7,6 +7,7 @@ from apps.utilisateurs.views import ChangerMotDePasseView, LogoutView, MonProfil
 
 from apps.utilisateurs.views import RegisterView, UmredTokenObtainPairView, VerifierJetonView, DefinirMotDePasseView, MotDePasseOublieView
 from apps.utilisateurs.views import ActiverCompteView, RenvoyerActivationView
+from apps.utilisateurs.authentication import TokenRefreshEtablissementSerializer
 
 
 from django.conf import settings
@@ -16,7 +17,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
 
     path('api/auth/login/', UmredTokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('api/auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/auth/refresh/', TokenRefreshView.as_view(serializer_class=TokenRefreshEtablissementSerializer),
+         name='token_refresh'),
     path('api/auth/register/', RegisterView.as_view(), name='register'),
     path('api/auth/logout/', LogoutView.as_view(), name='logout'),
     path('api/auth/activer-compte/', ActiverCompteView.as_view(), name='activer-compte'),
