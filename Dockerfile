@@ -1,41 +1,30 @@
-# ---------- Étape 1 : dépendances ----------
-# Les roues (wheels) sont compilées dans une étape séparée : l'image finale
-# ne contient ni compilateur ni en-têtes de développement.
-FROM python:3.12-slim AS dependances
-
-ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-WORKDIR /build
-COPY requirements.txt .
-RUN pip wheel --wheel-dir /wheels -r requirements.txt
-
-
-# ---------- Étape 2 : image d'exécution ----------
+# Image de base : Python léger
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+# Configuration Python
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY --from=dependances /wheels /wheels
-RUN pip install /wheels/* && rm -rf /wheels
+# Dépendances système nécessaires pour PostgreSQL
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
-# Utilisateur sans privilèges : une faille dans l'application ne donne pas
-# les droits root sur le conteneur.
-RUN useradd --create-home --uid 1000 umred
-COPY --chown=umred:umred . .
-RUN mkdir -p /app/media /app/staticfiles && chown -R umred:umred /app/media /app/staticfiles \
-    && chmod +x docker/entrypoint.sh
+# Dépendances Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-USER umred
+# Copie tout le projet
+# Cela copie également docker/entrypoint.sh
+COPY . .
 
-# Fichiers statiques (admin Django, Swagger) collectés au build ; une clé
-# factice suffit, collectstatic ne signe rien.
-RUN SECRET_KEY=build-uniquement DATABASE_URL=sqlite:////tmp/build.db python manage.py collectstatic --noinput
+# Rend l'entrypoint exécutable
+RUN chmod +x /app/docker/entrypoint.sh
 
 EXPOSE 8000
 
-ENTRYPOINT ["docker/entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "120", "--access-logfile", "-"]
+# Script de démarrage
+ENTRYPOINT ["/app/docker/entrypoint.sh"]

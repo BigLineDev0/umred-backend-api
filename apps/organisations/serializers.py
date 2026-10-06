@@ -32,8 +32,12 @@ class OrganisationSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         # Réutilise les contrôles du modèle (horaires, durées) sur l'objet
         # tel qu'il serait après modification.
-        instance = Organisation(**{**({f.name: getattr(self.instance, f.name) for f in Organisation._meta.fields}
-                                      if self.instance else {}), **attrs})
+        # Seuls les champs du modèle : à la création, attrs contient aussi
+        # les champs du futur administrateur (admin_email...).
+        champs = {f.name for f in Organisation._meta.fields}
+        valeurs = {nom: getattr(self.instance, nom) for nom in champs} if self.instance else {}
+        valeurs.update({nom: valeur for nom, valeur in attrs.items() if nom in champs})
+        instance = Organisation(**valeurs)
         try:
             instance.clean()
         except DjangoValidationError as e:

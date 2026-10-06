@@ -51,3 +51,31 @@ class SuspensionEtablissementTests(APITestCase):
         access = str(RefreshToken.for_user(self.chercheur).access_token)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
         self.assertEqual(self.client.get('/api/utilisateurs/moi/').status_code, 200)
+
+
+class CreationEtablissementTests(APITestCase):
+    """Le super-admin crée un établissement et son premier administrateur en une requête."""
+
+    def setUp(self):
+        self.editeur = Utilisateur.objects.create_user(
+            email='editeur@test.sn', password='x', nom='E', prenom='E', role=Role.SUPER_ADMIN,
+        )
+        self.client.force_authenticate(self.editeur)
+
+    def test_creation_avec_son_administrateur(self):
+        reponse = self.client.post('/api/organisations/', {
+            'nom': 'Université Test', 'slug': 'test',
+            'admin_email': 'admin@test.sn', 'admin_nom': 'A', 'admin_prenom': 'A',
+        }, format='json')
+        self.assertEqual(reponse.status_code, 201)
+        admin = Utilisateur.objects.get(email='admin@test.sn')
+        self.assertEqual(admin.role, Role.ADMIN)
+        self.assertEqual(admin.organisation.slug, 'test')
+
+    def test_horaires_incoherents_refuses(self):
+        reponse = self.client.post('/api/organisations/', {
+            'nom': 'Université Test', 'slug': 'test', 'heure_ouverture': '18:00', 'heure_fermeture': '08:00',
+            'admin_email': 'admin@test.sn', 'admin_nom': 'A', 'admin_prenom': 'A',
+        }, format='json')
+        self.assertEqual(reponse.status_code, 400)
+        self.assertFalse(Organisation.objects.exists())

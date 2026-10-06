@@ -1,16 +1,145 @@
+# Déploiement : DOMAINE (défaut senlab.site) et les secrets sont lus dans
+# le fichier .env de ce dossier. Les ports ne sont publiés que sur
+# 127.0.0.1 : seul le Nginx du serveur (HTTPS via Certbot, voir
+# deploiement/nginx-senlab.conf) est joignable depuis Internet.
+#   senlab.site     -> frontend  (127.0.0.1:8090)
+#   api.senlab.site -> backend   (127.0.0.1:8010)
+#   ia.senlab.site  -> service IA (127.0.0.1:8011)
+
+# Configuration commune au backend et au planificateur.
+x-backend-env: &backend-env
+  # Écrase la valeur du .env (sqlite/localhost en local) pour pointer vers
+  # le conteneur "db", joignable par son nom de service.
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+  # Le service IA expose ses routes sous /api (ex. /api/pilotage/synthese).
+  IA_SERVICE_URL: http://ia:8001/api
+  DEBUG: "False"
+  # "backend" : nom d'hôte utilisé par le service IA pour appeler l'API.
+  ALLOWED_HOSTS: api.${DOMAINE:-senlab.site},backend
+  CSRF_TRUSTED_ORIGINS: https://api.${DOMAINE:-senlab.site}
+  CORS_ALLOWED_ORIGINS: https://${DOMAINE:-senlab.site}
+  # Liens envoyés dans les emails (activation, mot de passe...).
+  FRONTEND_URL: https://${DOMAINE:-senlab.site}
+  # Le Nginx du serveur fait déjà la redirection HTTPS ; et le service IA appelle Django
+  # en HTTP interne (http://backend:8000), qui ne doit pas être redirigé.
+  SECURE_SSL_REDIRECT: "False"
+  COOKIES_SECURISES: "True"
+
 services:
+
+  # Base de données PostgreSQL
   db:
-    image: postgres:16
+    image: postgres:16-alpine
+    container_name: senlab_db
+    restart: unless-stopped
+
     environment:
-      POSTGRES_DB: umred_labo
-      POSTGRES_USER: umred
-      POSTGRES_PASSWORD: umred
-    ports:
-      # 127.0.0.1 : la base n'est joignable que depuis cette machine, pas
-      # depuis le réseau (les identifiants ci-dessous sont ceux de dev).
-      - "127.0.0.1:5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
+      # Les données Postgres survivent aux redémarrages/rebuilds du conteneur.
       - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # API Django
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: senlab_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment: *backend-env
+    ports:
+      - "127.0.0.1:8010:8000"
+    volumes:
+      # Les fichiers uploadés (photos de terrains, documents gérants...)
+      # survivent aux redémarrages du conteneur.
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      ia:
+        condition: service_started
+
+  # Tâches planifiées (clôture des réservations, synthèse hebdomadaire).
+  # Même image que le backend ; ne pas activer en plus le workflow n8n
+  # équivalent, sinon les envois sont faits en double.
+  planificateur:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: senlab_planificateur
+    restart: unless-stopped
+    entrypoint: ["python", "manage.py", "planificateur"]
+    env_file:
+      - .env
+    environment: *backend-env
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      # Le backend applique les migrations au démarrage.
+      - backend
+
+  # Application Angular (frontend), servie par Nginx
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+
+    container_name: senlab_frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:80"
+
+  # Micro-service IA (FastAPI), séparé de Django (voir dossier IA/) :
+  # analyse de la demande / prix recommandés, et chatbot d'assistance.
+  ia:
+    build:
+     context: ../umred-labo-ia
+     dockerfile: Dockerfile
+
+    container_name: senlab_ia
+    restart: unless-stopped
+    env_file:
+      - ../umred-labo-ia/.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # Le téléchargement "xet" (rapide) de HuggingFace échoue parfois selon
+      # le réseau : on force le téléchargement HTTP classique, plus lent
+      # mais plus fiable.
+      HF_HUB_DISABLE_XET: "1"
+      # Écrase la valeur du .env (localhost) : Django est joignable par son
+      # nom de service sur le réseau Docker interne.
+      DJANGO_API_URL: http://backend:8000/api
+      # Doit être identique à la SECRET_KEY de Django (signature des JWT) :
+      # reprise directement du .env du backend, aucun risque de décalage.
+      JWT_SECRET_KEY: ${SECRET_KEY}
+      # Le frontend (senlab.site) appelle directement ia.senlab.site.
+      CORS_ORIGINS: '["https://${DOMAINE:-senlab.site}"]'
+    ports:
+      - "127.0.0.1:8011:8001"
+    volumes:
+      # Cache du modèle d'embeddings HuggingFace : évite de le retélécharger
+      # à chaque redémarrage du conteneur (le réseau vers HF peut être
+      # instable, autant ne payer ce coût qu'une seule fois).
+      - ia_hf_cache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   postgres_data:
+    name: senlab_postgres_data
+  media_data:
+    name: senlab_media_data
+  ia_hf_cache:
+    name: senlab_ia_hf_cache
