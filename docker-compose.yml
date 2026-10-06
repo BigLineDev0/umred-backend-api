@@ -6,6 +6,11 @@
 #   api.senlab.site -> backend   (127.0.0.1:8010)
 #   ia.senlab.site  -> service IA (127.0.0.1:8011)
 
+# Nom de projet explicite : sans lui, Compose prend le nom du dossier
+# ("backend"), déjà utilisé sur le VPS par Sama Terrain. Les deux stacks
+# se confondraient (services remplacés, conteneurs vus comme orphelins).
+name: senlab
+
 # Configuration commune au backend et au planificateur.
 x-backend-env: &backend-env
   # Écrase la valeur du .env (sqlite/localhost en local) pour pointer vers
