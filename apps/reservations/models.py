@@ -34,6 +34,11 @@ STATUTS_BLOQUANTS = [StatutReservation.VALIDEE, StatutReservation.TERMINEE]
 
 MOTIF_REFUS_CONCURRENCE = "Créneau attribué à une demande prioritaire sur le même équipement."
 
+# Seule une réservation dont l'issue est définitive s'archive : archiver une
+# demande en attente la ferait disparaître de la file sans décision, et une
+# réservation validée à venir bloquerait un créneau invisible dans les listes.
+STATUTS_ARCHIVABLES = [StatutReservation.REFUSEE, StatutReservation.ANNULEE, StatutReservation.TERMINEE]
+
 
 class Reservation(models.Model):
     demandeur = models.ForeignKey(
@@ -62,6 +67,18 @@ class Reservation(models.Model):
         'projets.Projet', on_delete=models.SET_NULL, null=True, blank=True, related_name='reservations'
     )
     est_archivee = models.BooleanField(default=False)
+    # Traçabilité : chaque décision garde QUI et QUAND, en plus du journal
+    # d'activité (validateur/date_validation pour validation et refus).
+    archivee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reservations_archivees'
+    )
+    date_archivage = models.DateTimeField(null=True, blank=True)
+    annulee_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reservations_annulees'
+    )
+    date_annulation = models.DateTimeField(null=True, blank=True)
     date_creation = models.DateTimeField(auto_now_add=True)
     date_validation = models.DateTimeField(null=True, blank=True)
     rappel_24h_envoye = models.BooleanField(default=False)
@@ -365,7 +382,7 @@ class Reservation(models.Model):
     def creneau_commence(self):
         return datetime.combine(self.date, self.heure_debut) <= timezone.localtime().replace(tzinfo=None)
 
-    def annuler(self):
+    def annuler(self, par=None):
         """Renvoie True si la réservation occupait le créneau (il se libère)."""
         if self.statut not in [StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE]:
             raise ValidationError("Cette réservation ne peut plus être annulée.")
@@ -375,16 +392,36 @@ class Reservation(models.Model):
             raise ValidationError("Impossible d'annuler une réservation dont le créneau a déjà commencé ou est passé.")
         liberait_creneau = self.statut == StatutReservation.VALIDEE
         self.statut = StatutReservation.ANNULEE
-        self.save(update_fields=['statut'])
+        self.annulee_par = par
+        self.date_annulation = timezone.now()
+        self.save(update_fields=['statut', 'annulee_par', 'date_annulation'])
         return liberait_creneau
 
-    def archiver(self):
+    @property
+    def est_archivable(self):
+        return not self.est_archivee and self.statut in STATUTS_ARCHIVABLES
+
+    def archiver(self, par=None):
+        if self.est_archivee:
+            raise ValidationError("Cette réservation est déjà archivée.")
+        if self.statut not in STATUTS_ARCHIVABLES:
+            raise ValidationError(
+                "Seule une réservation refusée, annulée ou terminée peut être archivée."
+            )
         self.est_archivee = True
-        self.save(update_fields=['est_archivee'])
+        self.archivee_par = par
+        self.date_archivage = timezone.now()
+        self.save(update_fields=['est_archivee', 'archivee_par', 'date_archivage'])
 
     def desarchiver(self):
+        if not self.est_archivee:
+            raise ValidationError("Cette réservation n'est pas archivée.")
+        # archivee_par est effacé : l'historique complet (qui a archivé puis
+        # restauré, et quand) reste dans le journal d'activité.
         self.est_archivee = False
-        self.save(update_fields=['est_archivee'])
+        self.archivee_par = None
+        self.date_archivage = None
+        self.save(update_fields=['est_archivee', 'archivee_par', 'date_archivage'])
 
 
 class AlerteCreneau(models.Model):

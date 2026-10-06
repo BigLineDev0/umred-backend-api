@@ -20,6 +20,7 @@ from datetime import datetime
 from .utils import lire_date, lire_id
 from .analytique import calculer_indicateurs
 from .rapport_pdf import generer_rapport_pdf
+from .services import enregistrer as journaliser
 from apps.organisations.isolation import filtrer_par_organisation
 
 import openpyxl
@@ -289,10 +290,14 @@ def rapports_export_pdf(request):
         reservations = reservations.filter(laboratoire_id=laboratoire_id)
         labo = filtrer_par_organisation(Laboratoire.objects.all(), request.user).filter(id=laboratoire_id).first()
         laboratoire_nom = labo.nom if labo else None
-    reservations = list(reservations.select_related('laboratoire', 'demandeur').prefetch_related('equipements')
+    reservations = list(reservations.select_related('laboratoire', 'demandeur', 'validateur').prefetch_related('equipements')
                         .order_by('date', 'heure_debut'))
 
-    contenu = generer_rapport_pdf(indicateurs, reservations, request.user.organisation, laboratoire_nom)
+    contenu = generer_rapport_pdf(indicateurs, reservations, request.user.organisation, laboratoire_nom, request.user)
+    # Un rapport exporté sort de la plateforme : on trace qui l'a extrait et sur quel périmètre.
+    journaliser(request.user, "Export du rapport d'activité (PDF)", None,
+                f"Période {indicateurs['periode']['debut']} → {indicateurs['periode']['fin']}"
+                + (f", {laboratoire_nom}" if laboratoire_nom else ''))
     response = HttpResponse(contenu, content_type='application/pdf')
     response['Content-Disposition'] = f'attachment; filename="rapport_activite_{datetime.now():%Y%m%d}.pdf"'
     return response

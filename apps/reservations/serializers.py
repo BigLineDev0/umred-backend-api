@@ -12,6 +12,7 @@ ROLES_SUPERVISEURS = [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
 # motif ni le projet de recherche du demandeur.
 CHAMPS_PRIVES = [
     'demandeur_email', 'motif', 'motif_refus', 'projet', 'projet_nom', 'rappel_24h_envoye', 'rappel_1h_envoye',
+    'annulee_par', 'annulee_par_nom', 'archivee_par', 'archivee_par_nom',
 ]
 
 
@@ -33,11 +34,25 @@ class ReservationSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
     # Calculé par le serveur (qui a l'heure de référence) : le frontend
     # n'affiche le bouton d'annulation que si l'action est réellement permise.
     annulable = serializers.SerializerMethodField()
+    archivable = serializers.BooleanField(source='est_archivable', read_only=True)
+
+    # Traçabilité : qui a statué, annulé ou archivé, sous forme lisible.
+    validateur_nom = serializers.CharField(source='validateur.nom_complet', read_only=True, allow_null=True)
+    validateur_role = serializers.CharField(source='validateur.get_role_display', read_only=True, allow_null=True)
+    annulee_par_nom = serializers.CharField(source='annulee_par.nom_complet', read_only=True, allow_null=True)
+    archivee_par_nom = serializers.CharField(source='archivee_par.nom_complet', read_only=True, allow_null=True)
+    # Décision prise par les règles et non par une personne : confirmation
+    # immédiate (aucune validation requise) ou refus prononcé par le moteur
+    # d'arbitrage au profit d'une demande concurrente prioritaire.
+    decision_automatique = serializers.SerializerMethodField()
 
     class Meta:
         model = Reservation
         fields = [
-            'id', 'demandeur', 'demandeur_nom','demandeur_email', 'validateur',
+            'id', 'demandeur', 'demandeur_nom', 'demandeur_email',
+            'validateur', 'validateur_nom', 'validateur_role', 'decision_automatique',
+            'annulee_par', 'annulee_par_nom', 'date_annulation',
+            'archivee_par', 'archivee_par_nom', 'date_archivage', 'archivable',
             'laboratoire', 'laboratoire_nom', 'equipements', 'equipements_noms',
             'demandeur_role', 'date', 'heure_debut', 'heure_fin', 'motif',
             'statut', 'motif_refus', 'est_archivee', 'date_creation', 'date_validation',
@@ -47,11 +62,18 @@ class ReservationSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
         read_only_fields = [
             'demandeur', 'validateur', 'statut', 'motif_refus', 'est_archivee', 'date_creation', 'date_validation',
             'rappel_24h_envoye', 'rappel_1h_envoye',
+            'annulee_par', 'date_annulation', 'archivee_par', 'date_archivage',
         ]
 
     def get_annulable(self, obj) -> bool:
         from .models import StatutReservation
         return obj.statut in [StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE] and not obj.creneau_commence()
+
+    def get_decision_automatique(self, obj) -> bool:
+        from .models import MOTIF_REFUS_CONCURRENCE, STATUTS_BLOQUANTS, StatutReservation
+        if obj.statut == StatutReservation.REFUSEE:
+            return obj.motif_refus == MOTIF_REFUS_CONCURRENCE
+        return obj.statut in STATUTS_BLOQUANTS and obj.validateur_id is None
 
     def get_equipements_noms(self, obj) -> list[str]:
         return [e.nom for e in obj.equipements.all()]

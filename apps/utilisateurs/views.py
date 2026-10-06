@@ -151,7 +151,7 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
 
         utilisateur.desactiver_compte()
         revoquer_sessions(utilisateur)
-        annulees = annuler_reservations_futures(utilisateur)
+        annulees = annuler_reservations_futures(utilisateur, par=request.user)
         journaliser(request.user, "Désactivation d'un compte", utilisateur,
                     f'{annulees} réservation(s) à venir annulée(s)' if annulees else '')
         return Response(UtilisateurSerializer(utilisateur).data)

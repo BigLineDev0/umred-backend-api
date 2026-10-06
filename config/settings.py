@@ -31,7 +31,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_spectacular',
 
-    # Apps UMRED
+    # Apps SenLab
     'apps.organisations',
     'apps.utilisateurs',
     'apps.laboratoires',
@@ -157,7 +157,7 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'UMRED Labo API',
+    'TITLE': 'SenLab API',
     'DESCRIPTION': "API de gestion des plannings, équipements et maintenance",
     'VERSION': '1.0.0',
 }
@@ -184,7 +184,7 @@ EMAIL_PORT = env.int('EMAIL_PORT', default=587)
 EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
 EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
-DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='UMRED Labo <no-reply@umred.sn>')
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='SenLab <no-reply@senlab.sn>')
 
 # Envoi par API HTTP (Brevo) : à utiliser là où les ports SMTP sont bloqués
 # (Render gratuit bloque 25, 465 et 587). Activé avec

@@ -72,33 +72,48 @@ class ReservationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         est_superviseur = user.role in ROLES_SUPERVISEURS
+        params = self.request.query_params
         laboratoire_id = lire_id(self.request, 'laboratoire')
         date_debut = lire_date(self.request, 'date_debut')
         date_fin = lire_date(self.request, 'date_fin')
-        statut = self.request.query_params.get('statut')
-        inclure_toutes = self.request.query_params.get('all') == 'true'
+        statut = params.get('statut')
         base = self._base()
 
-        # Règles de visibilité en liste :
-        #  - ?all=true (superviseurs uniquement) : toutes les réservations ;
+        # Règles de visibilité en liste (vérifiées ici, côté serveur : le
+        # frontend ne fait qu'afficher ce que l'API accepte de renvoyer) :
+        #  - ?all=true (admin uniquement) : toutes les réservations de
+        #    l'établissement ;
+        #  - ?traitees=true (superviseurs) : celles sur lesquelles
+        #    l'utilisateur a statué (validées ou refusées par lui) ;
         #  - ?laboratoire=X : le planning du labo, limité aux réservations
         #    VALIDEES (ce qui occupe réellement la salle) ;
         #  - sinon : uniquement « mes » réservations.
+        # Archives : exclues par défaut ; ?archivees=only les isole (onglet
+        # Archives), ?archivees=true les inclut (rapports sur une période).
         # Hors liste (retrieve, actions detail=True), un superviseur accède
         # à tout l'établissement, un étudiant seulement à ses propres
         # réservations : un id appartenant à quelqu'un d'autre renvoie 404.
         if self.action == 'list':
-            if inclure_toutes and est_superviseur:
+            if params.get('all') == 'true':
+                if user.role != Role.ADMIN:
+                    raise PermissionDenied("Seul un administrateur peut consulter toutes les réservations.")
                 qs = base
+            elif params.get('traitees') == 'true' and est_superviseur:
+                qs = base.filter(validateur=user)
             elif laboratoire_id:
                 qs = base.filter(statut=StatutReservation.VALIDEE)
             else:
                 qs = base.filter(demandeur=user)
 
-            if self.request.query_params.get('archivees') != 'true':
+            archivees = params.get('archivees')
+            if archivees == 'only':
+                if user.role != Role.ADMIN:
+                    raise PermissionDenied("Les archives sont réservées aux administrateurs.")
+                qs = qs.filter(est_archivee=True)
+            elif archivees != 'true':
                 qs = qs.exclude(est_archivee=True)
 
-            if self.request.query_params.get('a_venir') == 'true':
+            if params.get('a_venir') == 'true':
                 qs = qs.filter(date__gte=timezone.localdate())
         elif self.action in self.ACTIONS_RAPPEL:
             qs = base
@@ -116,7 +131,9 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
         # Charge en une fois les objets liés affichés par le serializer
         # (évite une requête SQL par réservation : problème « N+1 »).
-        return qs.select_related('demandeur', 'laboratoire__organisation', 'projet').prefetch_related('equipements')
+        return qs.select_related(
+            'demandeur', 'validateur', 'annulee_par', 'archivee_par', 'laboratoire__organisation', 'projet',
+        ).prefetch_related('equipements')
 
     # --- Construction et analyse d'une demande ---
 
@@ -253,6 +270,11 @@ class ReservationViewSet(viewsets.ModelViewSet):
         ).prefetch_related('equipements').order_by('date', 'heure_debut', 'date_creation')
         if user.role == Role.CHERCHEUR:
             qs = qs.filter(demandeur__encadrant=user)
+        if user.role != Role.ADMIN:
+            # Séparation des rôles : on ne statue pas sur sa propre demande,
+            # elle n'a donc rien à faire dans sa file (elle reste visible
+            # dans « Mes réservations »).
+            qs = qs.exclude(demandeur=user)
 
         resultats = []
         for reservation in qs:
@@ -366,7 +388,8 @@ class ReservationViewSet(viewsets.ModelViewSet):
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages)
         journaliser(request.user, 'Validation de réservation', reservation,
-                    f'{len(refusees)} demande(s) concurrente(s) refusée(s)' if refusees else '')
+                    f"{len(refusees)} demande(s) concurrente(s) refusée(s) : "
+                    f"{', '.join(r.demandeur.nom_complet for r in refusees)}" if refusees else '')
         notifier(reservation.demandeur, 'Réservation validée',
                  f'Votre réservation du {reservation.date:%d/%m/%Y} a été validée.',
                  TypeNotification.VALIDATION, reservation)
@@ -374,10 +397,10 @@ class ReservationViewSet(viewsets.ModelViewSet):
             "laboratoire": reservation.laboratoire.nom, "date": str(reservation.date),
         })
         for refusee in refusees:
-            self._prevenir_refus_concurrence(refusee)
+            self._prevenir_refus_concurrence(refusee, retenue=reservation)
         return Response(self.get_serializer(reservation).data)
 
-    def _prevenir_refus_concurrence(self, reservation):
+    def _prevenir_refus_concurrence(self, reservation, retenue):
         """
         Le demandeur écarté reçoit la meilleure alternative calculée, et il
         est inscrit d'office sur la liste d'attente du créneau : si la
@@ -395,7 +418,8 @@ class ReservationViewSet(viewsets.ModelViewSet):
                  TypeNotification.VALIDATION, reservation, email=True)
         creer_alerte(reservation.demandeur, reservation.laboratoire, ids,
                      reservation.date, reservation.heure_debut, reservation.heure_fin)
-        journaliser(reservation.validateur, 'Refus automatique (concurrence)', reservation)
+        journaliser(reservation.validateur, 'Refus automatique (concurrence)', reservation,
+                    f'Créneau attribué à la demande n°{retenue.pk} de {retenue.demandeur.nom_complet}.')
 
     @action(detail=True, methods=['post'], permission_classes=[EstValidateur])
     def refuser(self, request, pk=None):
@@ -425,10 +449,11 @@ class ReservationViewSet(viewsets.ModelViewSet):
         if reservation.demandeur_id != user.id and user.role not in [Role.TECHNICIEN, Role.ADMIN]:
             raise PermissionDenied("Vous ne pouvez annuler que vos propres réservations.")
         try:
-            liberait_creneau = reservation.annuler()
+            liberait_creneau = reservation.annuler(par=user)
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages)
-        journaliser(user, 'Annulation de réservation', reservation)
+        journaliser(user, 'Annulation de réservation', reservation,
+                    '' if reservation.demandeur_id == user.id else f'Pour le compte de {reservation.demandeur.nom_complet}')
         if reservation.demandeur_id != user.id:
             notifier(reservation.demandeur, 'Réservation annulée',
                      f'Votre réservation du {reservation.date:%d/%m/%Y} a été annulée par {user.nom_complet}.',
@@ -440,16 +465,56 @@ class ReservationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[EstAdmin])
     def archiver(self, request, pk=None):
         reservation = self.get_object()
-        reservation.archiver()
+        try:
+            reservation.archiver(par=request.user)
+        except DjangoValidationError as e:
+            raise DRFValidationError(e.messages)
         journaliser(request.user, 'Archivage de réservation', reservation)
         return Response(self.get_serializer(reservation).data)
 
     @action(detail=True, methods=['post'], permission_classes=[EstAdmin])
     def desarchiver(self, request, pk=None):
         reservation = self.get_object()
-        reservation.desarchiver()
+        try:
+            reservation.desarchiver()
+        except DjangoValidationError as e:
+            raise DRFValidationError(e.messages)
         journaliser(request.user, 'Désarchivage de réservation', reservation)
         return Response(self.get_serializer(reservation).data)
+
+    def perform_destroy(self, instance):
+        # La suppression efface la ligne : on fige dans le journal ce qui
+        # disparaît, pour que l'audit reste complet.
+        journaliser(
+            self.request.user, 'Suppression de réservation', instance,
+            f'{instance.demandeur.nom_complet} — {instance.laboratoire.nom} — '
+            f'{instance.date:%d/%m/%Y} {instance.heure_debut:%H:%M}-{instance.heure_fin:%H:%M} '
+            f'({instance.get_statut_display()})',
+        )
+        instance.delete()
+
+    @action(detail=True, methods=['get'])
+    def historique(self, request, pk=None):
+        """
+        Chronologie de la réservation (création, décisions, annulation,
+        archivage...) reconstituée à partir du journal d'audit. get_object()
+        applique les règles de visibilité : un étudiant ne voit que
+        l'historique de ses propres demandes.
+        """
+        from django.contrib.contenttypes.models import ContentType
+        from apps.core.models import JournalActivite
+
+        reservation = self.get_object()
+        entrees = JournalActivite.objects.filter(
+            entite_type=ContentType.objects.get_for_model(Reservation), entite_id=reservation.pk,
+        ).select_related('auteur').order_by('date_heure')
+        return Response([{
+            'action': e.action,
+            'description': e.description,
+            'auteur': e.auteur.nom_complet if e.auteur else 'Système',
+            'auteur_role': e.auteur.get_role_display() if e.auteur else '',
+            'date_heure': e.date_heure,
+        } for e in entrees])
 
     # --- Rappels (consommés par le workflow d'automatisation) ---
     # Le workflow interroge ces endpoints périodiquement, envoie les

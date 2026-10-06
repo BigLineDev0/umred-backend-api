@@ -12,6 +12,7 @@ from datetime import datetime, time, timedelta
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.core.services import enregistrer as journaliser
 from apps.notifications.models import TypeNotification
 from apps.notifications.services import notifier
 
@@ -233,11 +234,12 @@ def liberer_creneau(reservation):
     return len(alertes)
 
 
-def annuler_reservations_futures(utilisateur):
+def annuler_reservations_futures(utilisateur, par=None):
     """
     Compte désactivé : ses réservations à venir sont annulées, sinon elles
     bloqueraient des créneaux que personne n'utilisera. Les personnes en
     liste d'attente de ces créneaux sont prévenues. Renvoie le nombre annulé.
+    'par' est l'administrateur à l'origine de la désactivation (traçabilité).
     """
     maintenant = timezone.localtime()
     a_venir = Reservation.objects.filter(
@@ -246,8 +248,9 @@ def annuler_reservations_futures(utilisateur):
     ).select_related('laboratoire').prefetch_related('equipements')
     n = 0
     for reservation in a_venir:
-        if reservation.annuler():
+        if reservation.annuler(par=par):
             liberer_creneau(reservation)
+        journaliser(par, 'Annulation de réservation', reservation, 'Compte du demandeur désactivé')
         n += 1
     return n
 
