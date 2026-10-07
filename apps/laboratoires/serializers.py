@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from apps.core.validation import valider_nom_commun, valider_texte_long
 from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Laboratoire
 
@@ -17,6 +18,16 @@ class LaboratoireSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
             'nombre_equipements', 'nombre_equipements_disponibles', 'date_creation',
         ]
         read_only_fields = ['date_creation']
+
+    def validate_nom(self, value):
+        return valider_nom_commun(value)
+
+    def validate_localisation(self, value):
+        return valider_nom_commun(value, min_len=2, max_len=150)
+
+    def validate_description(self, value):
+        # Obligatoire (min 10) côté application, cohérent avec le formulaire Angular.
+        return valider_texte_long(value, max_len=500, min_len=10, obligatoire=True)
 
     # Valeurs pré-calculées par l'annotate() de LaboratoireViewSet quand
     # elles existent ; sinon (objet chargé ailleurs) on compte directement.

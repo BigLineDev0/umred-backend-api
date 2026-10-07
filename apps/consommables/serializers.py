@@ -1,8 +1,12 @@
+from datetime import date
 from decimal import Decimal
 
 from rest_framework import serializers
+from apps.core.validation import valider_nom_commun, valider_reference
 from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Consommable, MouvementStock
+
+QUANTITE_MAX = Decimal("1000000")
 
 
 class ConsommableSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
@@ -19,6 +23,33 @@ class ConsommableSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
             'peremption_proche', 'date_creation',
         ]
         read_only_fields = ['date_creation']
+
+    def validate_nom(self, value):
+        return valider_nom_commun(value)
+
+    def validate_reference(self, value):
+        return valider_reference(value)
+
+    def validate_quantite_stock(self, value):
+        if value < 0:
+            raise serializers.ValidationError("La quantité ne peut pas être négative.")
+        if value > QUANTITE_MAX:
+            raise serializers.ValidationError("Quantité trop élevée.")
+        return value
+
+    def validate_seuil_alerte(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Le seuil d'alerte ne peut pas être négatif.")
+        if value > QUANTITE_MAX:
+            raise serializers.ValidationError("Seuil d'alerte trop élevé.")
+        return value
+
+    def validate_date_peremption(self, value):
+        # Refusée seulement à la création : un consommable déjà périmé peut
+        # exister en base et rester modifiable.
+        if value and self.instance is None and value < date.today():
+            raise serializers.ValidationError("La date de péremption ne peut pas être déjà passée.")
+        return value
 
 
 class MouvementStockSerializer(serializers.ModelSerializer):
