@@ -45,7 +45,7 @@ urlpatterns = [
     
 ]
 
-if settings.DEBUG:
+if settings.ENABLE_API_DOCS:
     # La documentation Swagger décrit toute la surface de l'API : utile en
     # développement, mais inutile de la publier en production.
     urlpatterns += [

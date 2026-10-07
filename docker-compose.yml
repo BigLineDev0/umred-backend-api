@@ -1,9 +1,11 @@
-# Déploiement : DOMAINE (défaut senlab.site) et les secrets sont lus dans
-# le fichier .env de ce dossier. Les ports ne sont publiés que sur
-# 127.0.0.1 : seul le Nginx du serveur (HTTPS via Certbot, voir
-# deploiement/nginx-senlab.conf) est joignable depuis Internet.
-#   senlab.site     -> frontend  (127.0.0.1:8090)
-#   api.senlab.site -> backend   (127.0.0.1:8010)
+# Même fichier en local et en production. Les URL publiques viennent du
+# .env de ce dossier ; leurs valeurs par défaut sont celles de production
+# (senlab.site), le .env local les remplace par http://localhost:...
+# Les ports ne sont publiés que sur 127.0.0.1 : en production, seul le Nginx
+# du serveur (HTTPS via Certbot, voir deploiement/nginx-senlab.conf) est
+# joignable depuis Internet.
+#   senlab.site     -> frontend   (127.0.0.1:8090)
+#   api.senlab.site -> backend    (127.0.0.1:8010)
 #   ia.senlab.site  -> service IA (127.0.0.1:8011)
 
 # Nom de projet explicite : sans lui, Compose prend le nom du dossier
@@ -19,16 +21,20 @@ x-backend-env: &backend-env
   # Le service IA expose ses routes sous /api (ex. /api/pilotage/synthese).
   IA_SERVICE_URL: http://ia:8001/api
   DEBUG: "False"
+  ENABLE_API_DOCS: "True"
   # "backend" : nom d'hôte utilisé par le service IA pour appeler l'API.
-  ALLOWED_HOSTS: api.${DOMAINE:-senlab.site},backend
-  CSRF_TRUSTED_ORIGINS: https://api.${DOMAINE:-senlab.site}
-  CORS_ALLOWED_ORIGINS: https://${DOMAINE:-senlab.site}
+  ALLOWED_HOSTS: ${HOTE_API:-api.senlab.site},backend,localhost,127.0.0.1
+  # Formulaires de l'admin Django.
+  CSRF_TRUSTED_ORIGINS: ${URL_API:-https://api.senlab.site}
+  # Origines du frontend autorisées à appeler l'API (liste séparée par des virgules).
+  CORS_ALLOWED_ORIGINS: ${ORIGINES_FRONTEND:-https://senlab.site}
   # Liens envoyés dans les emails (activation, mot de passe...).
-  FRONTEND_URL: https://${DOMAINE:-senlab.site}
+  FRONTEND_URL: ${URL_FRONTEND:-https://senlab.site}
   # Le Nginx du serveur fait déjà la redirection HTTPS ; et le service IA appelle Django
   # en HTTP interne (http://backend:8000), qui ne doit pas être redirigé.
   SECURE_SSL_REDIRECT: "False"
-  COOKIES_SECURISES: "True"
+  # False en local (HTTP), sinon impossible de se connecter à l'admin Django.
+  COOKIES_SECURISES: ${COOKIES_SECURISES:-True}
 
 services:
 
@@ -99,6 +105,10 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
+      # URL appelées par le navigateur, inscrites dans le build Angular.
+      args:
+        API_URL: ${URL_API:-https://api.senlab.site}/api
+        IA_URL: ${URL_IA:-https://ia.senlab.site}/api
 
     container_name: senlab_frontend
     restart: unless-stopped
@@ -128,8 +138,9 @@ services:
       # Doit être identique à la SECRET_KEY de Django (signature des JWT) :
       # reprise directement du .env du backend, aucun risque de décalage.
       JWT_SECRET_KEY: ${SECRET_KEY}
-      # Le frontend (senlab.site) appelle directement ia.senlab.site.
-      CORS_ORIGINS: '["https://${DOMAINE:-senlab.site}"]'
+      # Le frontend appelle directement le service IA (ia.senlab.site).
+      # Format JSON attendu par le service IA, ex. ["https://senlab.site"].
+      CORS_ORIGINS: ${ORIGINES_FRONTEND_IA:-["https://senlab.site"]}
     ports:
       - "127.0.0.1:8011:8001"
     volumes:
