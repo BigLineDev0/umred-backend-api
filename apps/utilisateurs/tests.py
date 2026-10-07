@@ -121,7 +121,9 @@ class MotDePasseTests(APITestCase):
         reponse = self.client.post('/api/auth/definir-mot-de-passe/',
                                    {'jeton': jeton.jeton, 'password': '12345678'}, format='json')
         self.assertEqual(reponse.status_code, 400)
-        self.assertIn('detail', reponse.data)
+        # Mot de passe trop court (< 10) ET trop courant : l'erreur peut être
+        # signalée au niveau du champ 'password' ou en message global 'detail'.
+        self.assertTrue('password' in reponse.data or 'detail' in reponse.data)
 
     def test_changer_mot_de_passe_renvoie_de_nouveaux_tokens(self):
         ancien_refresh = str(RefreshToken.for_user(self.user))

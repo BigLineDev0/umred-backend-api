@@ -1,4 +1,7 @@
+from django.utils import timezone
+
 from rest_framework import serializers
+from apps.core.validation import valider_texte_long
 from apps.organisations.isolation import ChampsOrganisationMixin
 from apps.utilisateurs.models import Role
 from .models import AlerteCreneau, Reservation
@@ -77,6 +80,16 @@ class ReservationSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
 
     def get_equipements_noms(self, obj) -> list[str]:
         return [e.nom for e in obj.equipements.all()]
+
+    def validate_motif(self, value):
+        # min 2 : « TP » (travaux pratiques) est un motif légitime et courant.
+        return valider_texte_long(value, min_len=2, max_len=255, obligatoire=True)
+
+    def validate_date(self, value):
+        # Une réservation ne se crée pas dans le passé (contrôle à la création).
+        if value and self.instance is None and value < timezone.localdate():
+            raise serializers.ValidationError("La date de réservation ne peut pas être déjà passée.")
+        return value
 
     def validate(self, attrs):
         # Vérifié dès le serializer (et pas seulement dans Reservation.clean)

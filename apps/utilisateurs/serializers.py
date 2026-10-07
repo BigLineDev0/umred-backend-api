@@ -7,9 +7,14 @@ from .models import StatutCompte
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import exceptions, serializers
+from apps.core.validation import valider_nom_commun, valider_telephone_senegal
 from apps.organisations.isolation import ChampsOrganisationMixin, est_super_admin
 from apps.organisations.models import Organisation
 from .models import Utilisateur, Role
+
+
+def valider_nom_personne(value):
+    return valider_nom_commun(value, min_len=2, max_len=100)
 
 
 def verifier_robustesse(password, utilisateur):
@@ -102,7 +107,7 @@ class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, min_length=10)
     # L'étudiant choisit son établissement parmi ceux qui sont actifs.
     organisation = serializers.PrimaryKeyRelatedField(queryset=Organisation.objects.filter(est_active=True))
 
@@ -112,6 +117,12 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         return verifier_email_unique(value)
+
+    def validate_nom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_prenom(self, value):
+        return valider_nom_personne(value)
 
     def validate(self, attrs):
         # Utilisateur temporaire (non sauvegardé) pour que le validateur de
@@ -170,6 +181,15 @@ class UtilisateurSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
     def validate_email(self, value):
         return verifier_email_unique(value, self.instance)
 
+    def validate_nom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_prenom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_telephone(self, value):
+        return valider_telephone_senegal(value)
+
     def validate(self, attrs):
         return verifier_encadrant(attrs, self.instance)
 
@@ -185,13 +205,22 @@ class UtilisateurCreateSerializer(ChampsOrganisationMixin, serializers.ModelSeri
     def validate_email(self, value):
         return verifier_email_unique(value)
 
+    def validate_nom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_prenom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_telephone(self, value):
+        return valider_telephone_senegal(value)
+
     def validate(self, attrs):
         return verifier_encadrant(attrs)
 
 
 class DefinirMotDePasseSerializer(serializers.Serializer):
     jeton = serializers.CharField()
-    password = serializers.CharField(min_length=8, write_only=True)
+    password = serializers.CharField(min_length=10, write_only=True)
 
 
 class ChangerMotDePasseSerializer(serializers.Serializer):
@@ -223,6 +252,15 @@ class MonProfilUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Utilisateur
         fields = ['nom', 'prenom', 'telephone', 'photo']
+
+    def validate_nom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_prenom(self, value):
+        return valider_nom_personne(value)
+
+    def validate_telephone(self, value):
+        return valider_telephone_senegal(value)
 
     def validate_photo(self, value):
         if value and value.size > 5 * 1024 * 1024:
