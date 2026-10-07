@@ -16,10 +16,13 @@ if url:
         try:
             psycopg.connect(url.replace('postgres://', 'postgresql://'), connect_timeout=2).close()
             break
-        except Exception:
+        except Exception as exc:
+            erreur = exc
             time.sleep(1)
     else:
-        sys.exit('Impossible de joindre la base de données.')
+        # La cause exacte (mot de passe refusé, hôte inconnu...) est
+        # indispensable pour diagnostiquer.
+        sys.exit(f'Impossible de joindre la base de données : {erreur}')
 "
 echo "Base de données prête."
 
