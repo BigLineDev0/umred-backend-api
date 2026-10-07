@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Lower
 from apps.laboratoires.models import Laboratoire
 
 
@@ -40,6 +41,9 @@ class Equipement(models.Model):
         verbose_name = 'Équipement'
         verbose_name_plural = 'Équipements'
         ordering = ['nom']
+        constraints = [
+            models.UniqueConstraint(Lower('nom'), 'laboratoire', name='uniq_equipement_nom_par_laboratoire'),
+        ]
 
     def __str__(self):
         return f'{self.nom} ({self.numero_serie})'

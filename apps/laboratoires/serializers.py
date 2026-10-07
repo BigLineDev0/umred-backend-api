@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.core.validation import valider_nom_commun, valider_texte_long
+from apps.core.validation import cle_unicite, valider_nom_commun, valider_texte_long
 from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Laboratoire
 
@@ -28,6 +28,26 @@ class LaboratoireSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
     def validate_description(self, value):
         # Obligatoire (min 10) côté application, cohérent avec le formulaire Angular.
         return valider_texte_long(value, max_len=500, min_len=10, obligatoire=True)
+
+    def validate(self, attrs):
+        # Unicité du nom par organisation, insensible à la casse/accents/espaces.
+        # L'organisation vient de l'instance (modif) ou de l'utilisateur (création).
+        nom = attrs.get('nom', getattr(self.instance, 'nom', None))
+        if nom:
+            if self.instance is not None:
+                organisation_id = self.instance.organisation_id
+            else:
+                user = getattr(self.context.get('request'), 'user', None)
+                organisation_id = getattr(user, 'organisation_id', None)
+            qs = Laboratoire.objects.filter(organisation_id=organisation_id)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            cible = cle_unicite(nom)
+            if any(cle_unicite(nom_existant) == cible for nom_existant in qs.values_list('nom', flat=True)):
+                raise serializers.ValidationError(
+                    {'nom': f"Un laboratoire nommé « {nom.strip()} » existe déjà dans votre établissement."}
+                )
+        return attrs
 
     # Valeurs pré-calculées par l'annotate() de LaboratoireViewSet quand
     # elles existent ; sinon (objet chargé ailleurs) on compte directement.

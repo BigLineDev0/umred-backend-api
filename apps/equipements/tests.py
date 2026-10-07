@@ -55,3 +55,36 @@ class EquipementTests(APITestCase):
         admin = Utilisateur.objects.create_user(email='a@umred.sn', password='x', nom='A', prenom='A', role=Role.ADMIN)
         self.client.force_authenticate(admin)
         self.assertEqual(self.client.delete(f'/api/laboratoires/{self.labo.id}/').status_code, 409)
+
+
+class EquipementValidationTests(APITestCase):
+    def setUp(self):
+        self.tech = Utilisateur.objects.create_user(
+            email='valid@test.sn', password='x', nom='V', prenom='V', role=Role.TECHNICIEN)
+        self.labo = Laboratoire.objects.create(nom='Labo Valid', localisation='Bât. 1')
+        self.autre_labo = Laboratoire.objects.create(nom='Autre labo', localisation='Bât. 2')
+        Equipement.objects.create(laboratoire=self.labo, nom='Microscope optique', numero_serie='SN-BASE')
+        self.client.force_authenticate(self.tech)
+
+    def _creer(self, **kw):
+        data = {'laboratoire': self.labo.id, 'nom': 'Nouvel appareil',
+                'numero_serie': 'SN-X', 'statut': 'DISPONIBLE'}
+        data.update(kw)
+        return self.client.post('/api/equipements/', data, format='json')
+
+    def test_doublon_meme_labo_insensible_casse_espaces(self):
+        reponse = self._creer(nom='  microscope   OPTIQUE ', numero_serie='SN-2')
+        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('nom', reponse.json())
+
+    def test_meme_nom_dans_autre_labo_autorise(self):
+        reponse = self._creer(laboratoire=self.autre_labo.id, nom='Microscope optique', numero_serie='SN-3')
+        self.assertEqual(reponse.status_code, 201)
+
+    def test_nom_invalide(self):
+        self.assertEqual(self._creer(nom='<b>x</b>', numero_serie='SN-4').status_code, 400)
+        self.assertEqual(self._creer(nom='123', numero_serie='SN-5').status_code, 400)
+
+    def test_date_acquisition_future_refusee(self):
+        future = (timezone.localdate() + timedelta(days=1)).isoformat()
+        self.assertEqual(self._creer(numero_serie='SN-6', date_acquisition=future).status_code, 400)

@@ -1,7 +1,7 @@
 from datetime import date
 
 from rest_framework import serializers
-from apps.core.validation import normaliser_espaces, valider_nom_commun, valider_texte_long
+from apps.core.validation import cle_unicite, normaliser_espaces, valider_nom_commun, valider_texte_long
 from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Equipement
 
@@ -45,6 +45,21 @@ class EquipementSerializer(ChampsOrganisationMixin, serializers.ModelSerializer)
         if value and value > date.today():
             raise serializers.ValidationError("La date d'acquisition ne peut pas être dans le futur.")
         return value
+
+    def validate(self, attrs):
+        # Unicité du nom à l'intérieur d'un même laboratoire.
+        nom = attrs.get('nom', getattr(self.instance, 'nom', None))
+        laboratoire = attrs.get('laboratoire', getattr(self.instance, 'laboratoire', None))
+        if nom and laboratoire:
+            qs = Equipement.objects.filter(laboratoire=laboratoire)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            cible = cle_unicite(nom)
+            if any(cle_unicite(nom_existant) == cible for nom_existant in qs.values_list('nom', flat=True)):
+                raise serializers.ValidationError(
+                    {'nom': f"Un équipement nommé « {nom.strip()} » existe déjà dans ce laboratoire."}
+                )
+        return attrs
 
     def get_nombre_utilisations(self, obj) -> int:
         # Valeur annotée par EquipementViewSet quand elle existe.

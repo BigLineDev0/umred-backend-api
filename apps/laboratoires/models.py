@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Lower
 from django.conf import settings
 
 
@@ -35,6 +36,11 @@ class Laboratoire(models.Model):
         verbose_name = 'Laboratoire'
         verbose_name_plural = 'Laboratoires'
         ordering = ['nom']
+        constraints = [
+            # Nom unique par organisation, insensible à la casse (backstop
+            # base ; l'insensibilité aux accents est assurée par le serializer).
+            models.UniqueConstraint(Lower('nom'), 'organisation', name='uniq_labo_nom_par_organisation'),
+        ]
 
     def __str__(self):
         return self.nom

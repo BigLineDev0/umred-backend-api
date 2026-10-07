@@ -1,5 +1,7 @@
 from django.conf import settings
 from django.db import models, transaction
+from django.db.models import Q
+from django.db.models.functions import Lower
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from apps.laboratoires.models import Laboratoire
@@ -36,6 +38,14 @@ class Consommable(models.Model):
         verbose_name = 'Consommable'
         verbose_name_plural = 'Consommables'
         ordering = ['nom']
+        constraints = [
+            models.UniqueConstraint(Lower('nom'), 'laboratoire', name='uniq_consommable_nom_par_laboratoire'),
+            # Référence unique par labo, seulement quand elle est renseignée.
+            models.UniqueConstraint(
+                Lower('reference'), 'laboratoire',
+                condition=~Q(reference=''), name='uniq_consommable_reference_par_laboratoire',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.nom} ({self.laboratoire})'

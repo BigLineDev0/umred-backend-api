@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from rest_framework import serializers
-from apps.core.validation import valider_nom_commun, valider_reference
+from apps.core.validation import cle_unicite, valider_nom_commun, valider_reference
 from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Consommable, MouvementStock
 
@@ -50,6 +50,29 @@ class ConsommableSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
         if value and self.instance is None and value < date.today():
             raise serializers.ValidationError("La date de péremption ne peut pas être déjà passée.")
         return value
+
+    def validate(self, attrs):
+        laboratoire = attrs.get('laboratoire', getattr(self.instance, 'laboratoire', None))
+        base = Consommable.objects.filter(laboratoire=laboratoire) if laboratoire else Consommable.objects.none()
+        if self.instance is not None:
+            base = base.exclude(pk=self.instance.pk)
+
+        nom = attrs.get('nom', getattr(self.instance, 'nom', None))
+        if nom and laboratoire:
+            cible = cle_unicite(nom)
+            if any(cle_unicite(n) == cible for n in base.values_list('nom', flat=True)):
+                raise serializers.ValidationError(
+                    {'nom': f"Un consommable nommé « {nom.strip()} » existe déjà dans ce laboratoire."}
+                )
+
+        reference = attrs.get('reference', getattr(self.instance, 'reference', None))
+        if reference and laboratoire:
+            cible = cle_unicite(reference)
+            if any(cle_unicite(r) == cible for r in base.values_list('reference', flat=True) if r):
+                raise serializers.ValidationError(
+                    {'reference': f"La référence « {reference.strip()} » est déjà utilisée dans ce laboratoire."}
+                )
+        return attrs
 
 
 class MouvementStockSerializer(serializers.ModelSerializer):

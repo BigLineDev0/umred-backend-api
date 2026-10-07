@@ -54,3 +54,43 @@ class AjustementEtAlertesTests(StockTests):
         self.api.post(url, {'quantite': '6'}, format='json')  # 10 -> 4 : passe sous le seuil
         self.api.post(url, {'quantite': '1'}, format='json')  # 4 -> 3 : toujours sous le seuil
         self.assertEqual(self.Notification.objects.filter(destinataire=self.technicien).count(), 1)
+
+
+from rest_framework.test import APITestCase  # noqa: E402
+
+
+class ConsommableValidationTests(APITestCase):
+    def setUp(self):
+        self.tech = Utilisateur.objects.create_user(
+            email='conso@test.sn', password='x', nom='C', prenom='C', role=Role.TECHNICIEN)
+        self.labo = Laboratoire.objects.create(nom='Labo conso', localisation='Bât. 1')
+        Consommable.objects.create(laboratoire=self.labo, nom='Éthanol', reference='ETH-001',
+                                   quantite_stock=Decimal('10'))
+        self.client.force_authenticate(self.tech)
+
+    def _creer(self, **kw):
+        data = {'laboratoire': self.labo.id, 'nom': 'Acétone', 'reference': 'ACE-001',
+                'unite': 'UNITE', 'quantite_stock': '5', 'seuil_alerte': '1'}
+        data.update(kw)
+        return self.client.post('/api/consommables/', data, format='json')
+
+    def test_creation_valide_met_reference_en_majuscules(self):
+        reponse = self._creer(reference='ace-001')
+        self.assertEqual(reponse.status_code, 201)
+        self.assertEqual(reponse.json()['reference'], 'ACE-001')
+
+    def test_nom_doublon_insensible_casse_espaces(self):
+        reponse = self._creer(nom='  ethanol ', reference='X-1')
+        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('nom', reponse.json())
+
+    def test_reference_doublon(self):
+        reponse = self._creer(nom='Autre produit', reference='eth-001')
+        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('reference', reponse.json())
+
+    def test_reference_format_invalide(self):
+        self.assertEqual(self._creer(reference='a b').status_code, 400)
+
+    def test_quantite_negative_refusee(self):
+        self.assertEqual(self._creer(reference='Q-1', quantite_stock='-1').status_code, 400)
