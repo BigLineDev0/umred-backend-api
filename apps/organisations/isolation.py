@@ -11,7 +11,7 @@ laboratoire -> organisation). Deux garde-fous complémentaires :
    acceptées par les serializers : impossible de rattacher sa réservation
    à l'équipement d'un autre établissement en envoyant son id.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time
 
 from rest_framework.relations import ManyRelatedField
@@ -64,6 +64,13 @@ class ReglesReservation:
     duree_min: int  # minutes
     duree_max: int  # minutes
     delai_max_jours: int
+    # Horaires par jour de la semaine : {weekday: (ferme, ouverture, fermeture)}.
+    # Vide -> on retombe sur heure_ouverture / heure_fermeture (tous les jours ouverts).
+    horaires: dict = field(default_factory=dict)
+
+    def jour(self, weekday):
+        """(ferme, ouverture, fermeture) pour un jour de la semaine (0 = lundi)."""
+        return self.horaires.get(weekday, (False, self.heure_ouverture, self.heure_fermeture))
 
 
 REGLES_PAR_DEFAUT = ReglesReservation(time(8, 0), time(19, 0), 30, 480, 60)
@@ -73,10 +80,15 @@ def regles_reservation(organisation):
     """Règles de l'établissement, ou valeurs par défaut s'il n'y en a pas."""
     if organisation is None:
         return REGLES_PAR_DEFAUT
+    horaires = {
+        h.jour: (h.ferme, h.heure_ouverture, h.heure_fermeture)
+        for h in organisation.horaires.all()
+    }
     return ReglesReservation(
         heure_ouverture=organisation.heure_ouverture,
         heure_fermeture=organisation.heure_fermeture,
         duree_min=organisation.duree_min_reservation,
         duree_max=organisation.duree_max_reservation,
         delai_max_jours=organisation.delai_max_reservation_jours,
+        horaires=horaires,
     )

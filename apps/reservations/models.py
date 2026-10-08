@@ -125,9 +125,13 @@ class Reservation(models.Model):
         maintenant = timezone.localtime()
         if datetime.combine(self.date, self.heure_debut) < maintenant.replace(tzinfo=None):
             raise ValidationError("Impossible de réserver un créneau déjà passé.")
-        if self.heure_debut < regles.heure_ouverture or self.heure_fin > regles.heure_fermeture:
+        # Horaires du jour de la semaine concerné (un jour peut être fermé).
+        ferme, ouverture, fermeture = regles.jour(self.date.weekday())
+        if ferme:
+            raise ValidationError("L'établissement est fermé ce jour-là : aucune réservation possible.")
+        if self.heure_debut < ouverture or self.heure_fin > fermeture:
             raise ValidationError(
-                f"Les réservations sont possibles entre {regles.heure_ouverture:%H:%M} et {regles.heure_fermeture:%H:%M}."
+                f"Ce jour-là, les réservations sont possibles entre {ouverture:%H:%M} et {fermeture:%H:%M}."
             )
         if self.date > maintenant.date() + timedelta(days=regles.delai_max_jours):
             raise ValidationError(f"On ne peut pas réserver plus de {regles.delai_max_jours} jours à l'avance.")

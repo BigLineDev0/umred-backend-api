@@ -2,7 +2,20 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from apps.utilisateurs.serializers import verifier_email_unique
-from .models import Organisation
+from .models import HoraireJour, Organisation
+
+
+class HoraireJourSerializer(serializers.Serializer):
+    """Horaire d'un jour de la semaine (0 = lundi … 6 = dimanche)."""
+    jour = serializers.IntegerField(min_value=0, max_value=6)
+    ferme = serializers.BooleanField(required=False, default=False)
+    heure_ouverture = serializers.TimeField(format='%H:%M')
+    heure_fermeture = serializers.TimeField(format='%H:%M')
+
+    def validate(self, attrs):
+        if not attrs.get('ferme') and attrs['heure_fermeture'] <= attrs['heure_ouverture']:
+            raise serializers.ValidationError("L'heure de fermeture doit être après l'heure d'ouverture.")
+        return attrs
 
 
 class OrganisationPubliqueSerializer(serializers.ModelSerializer):
@@ -14,12 +27,14 @@ class OrganisationPubliqueSerializer(serializers.ModelSerializer):
 
 class OrganisationSerializer(serializers.ModelSerializer):
     """Configuration de l'établissement, modifiable par son admin."""
+    horaires = HoraireJourSerializer(many=True, required=False)
+
     class Meta:
         model = Organisation
         fields = [
             'id', 'nom', 'slug', 'ville', 'email_contact', 'logo', 'couleur_primaire', 'couleur_secondaire',
             'heure_ouverture', 'heure_fermeture', 'duree_min_reservation', 'duree_max_reservation',
-            'delai_max_reservation_jours', 'est_active', 'date_creation',
+            'delai_max_reservation_jours', 'horaires', 'est_active', 'date_creation',
         ]
         # Le slug et l'état d'abonnement relèvent de l'éditeur (super-admin).
         read_only_fields = ['slug', 'est_active', 'date_creation']
@@ -28,6 +43,36 @@ class OrganisationSerializer(serializers.ModelSerializer):
         if value and value.size > 2 * 1024 * 1024:
             raise serializers.ValidationError("Le logo ne doit pas dépasser 2 Mo.")
         return value
+
+    def to_representation(self, instance):
+        """Toujours renvoyer les 7 jours (repli sur les horaires globaux si absent)."""
+        data = super().to_representation(instance)
+        existants = {h.jour: h for h in instance.horaires.all()}
+        data['horaires'] = [
+            {
+                'jour': j,
+                'ferme': existants[j].ferme if j in existants else False,
+                'heure_ouverture': (existants[j].heure_ouverture if j in existants else instance.heure_ouverture).strftime('%H:%M'),
+                'heure_fermeture': (existants[j].heure_fermeture if j in existants else instance.heure_fermeture).strftime('%H:%M'),
+            }
+            for j in range(7)
+        ]
+        return data
+
+    def update(self, instance, validated_data):
+        horaires = validated_data.pop('horaires', None)
+        instance = super().update(instance, validated_data)
+        if horaires is not None:
+            for h in horaires:
+                HoraireJour.objects.update_or_create(
+                    organisation=instance, jour=h['jour'],
+                    defaults={
+                        'ferme': h.get('ferme', False),
+                        'heure_ouverture': h['heure_ouverture'],
+                        'heure_fermeture': h['heure_fermeture'],
+                    },
+                )
+        return instance
 
     def validate(self, attrs):
         # Réutilise les contrôles du modèle (horaires, durées) sur l'objet

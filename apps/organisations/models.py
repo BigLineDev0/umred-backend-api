@@ -61,3 +61,53 @@ class Organisation(models.Model):
             raise ValidationError("La durée minimale d'une réservation est d'au moins 5 minutes.")
         if self.duree_max_reservation < self.duree_min_reservation:
             raise ValidationError("La durée maximale doit être supérieure ou égale à la durée minimale.")
+
+    def horaires_du_jour(self, jour_date):
+        """
+        (ferme, ouverture, fermeture) pour la date donnée, d'après l'horaire
+        du jour de la semaine. Repli sur les horaires globaux de
+        l'établissement si aucun horaire n'est défini pour ce jour (ex.
+        établissement créé avant l'ajout des horaires par jour).
+        """
+        horaire = self.horaires.filter(jour=jour_date.weekday()).first()
+        if horaire is None:
+            return (False, self.heure_ouverture, self.heure_fermeture)
+        return (horaire.ferme, horaire.heure_ouverture, horaire.heure_fermeture)
+
+
+class HoraireJour(models.Model):
+    """
+    Horaire d'ouverture d'un établissement pour un jour de la semaine.
+    Une ligne par jour (0 = lundi … 6 = dimanche) ; `ferme` indique un jour
+    de fermeture (ex. dimanche). Ces horaires s'appliquent aux réservations
+    et aux créneaux proposés.
+    """
+    class Jour(models.IntegerChoices):
+        LUNDI = 0, 'Lundi'
+        MARDI = 1, 'Mardi'
+        MERCREDI = 2, 'Mercredi'
+        JEUDI = 3, 'Jeudi'
+        VENDREDI = 4, 'Vendredi'
+        SAMEDI = 5, 'Samedi'
+        DIMANCHE = 6, 'Dimanche'
+
+    organisation = models.ForeignKey(Organisation, on_delete=models.CASCADE, related_name='horaires')
+    jour = models.PositiveSmallIntegerField(choices=Jour.choices)
+    ferme = models.BooleanField(default=False)
+    heure_ouverture = models.TimeField(default=time(8, 0))
+    heure_fermeture = models.TimeField(default=time(19, 0))
+
+    class Meta:
+        verbose_name = "Horaire d'ouverture"
+        verbose_name_plural = "Horaires d'ouverture"
+        ordering = ['organisation', 'jour']
+        constraints = [
+            models.UniqueConstraint(fields=['organisation', 'jour'], name='uniq_horaire_jour_par_organisation'),
+        ]
+
+    def __str__(self):
+        return f'{self.organisation} — {self.get_jour_display()}'
+
+    def clean(self):
+        if not self.ferme and self.heure_fermeture <= self.heure_ouverture:
+            raise ValidationError("L'heure de fermeture doit être après l'heure d'ouverture.")
