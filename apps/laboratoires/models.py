@@ -22,7 +22,9 @@ class Laboratoire(models.Model):
     statut = models.CharField(
         max_length=20, choices=StatutLaboratoire.choices, default=StatutLaboratoire.DISPONIBLE
     )
-    photo = models.URLField(blank=True, null=True)
+    # Photo affichée sur la carte et la fiche du laboratoire. Vide : le
+    # frontend affiche une photo par défaut.
+    photo = models.ImageField(upload_to='photos_laboratoires/', blank=True, null=True)
     responsable = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

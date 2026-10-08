@@ -3,6 +3,9 @@ from apps.core.validation import cle_unicite, valider_nom_commun, valider_texte_
 from apps.organisations.isolation import ChampsOrganisationMixin
 from .models import Laboratoire
 
+TAILLE_MAX_PHOTO = 5 * 1024 * 1024
+FORMATS_PHOTO = {'JPEG', 'PNG', 'WEBP'}
+
 
 class LaboratoireSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):
     champs_organisation = {'responsable': 'organisation'}
@@ -28,6 +31,19 @@ class LaboratoireSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
     def validate_description(self, value):
         # Obligatoire (min 10) côté application, cohérent avec le formulaire Angular.
         return valider_texte_long(value, max_len=500, min_len=10, obligatoire=True)
+
+    def validate_photo(self, value):
+        # Le champ ImageField a déjà vérifié avec Pillow que le fichier est
+        # bien une image (une extension renommée ne suffit pas) ; on limite
+        # en plus le poids et les formats affichables par les navigateurs.
+        if value is None:
+            return value
+        if value.size > TAILLE_MAX_PHOTO:
+            raise serializers.ValidationError("La photo ne doit pas dépasser 5 Mo.")
+        format_image = getattr(getattr(value, 'image', None), 'format', None)
+        if format_image not in FORMATS_PHOTO:
+            raise serializers.ValidationError("Formats acceptés : JPG, PNG ou WebP.")
+        return value
 
     def validate(self, attrs):
         # Unicité du nom par organisation, insensible à la casse/accents/espaces.
