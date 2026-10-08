@@ -52,13 +52,17 @@ if settings.ENABLE_API_DOCS:
         path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
         path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     ]
+
+# Fichiers envoyés par les utilisateurs (logos, photos, manuels PDF).
+# Indépendant de la documentation de l'API : auparavant, ENABLE_API_DOCS=True
+# avec DEBUG=False passait par static(), qui ne fait rien hors DEBUG, et tous
+# les médias renvoyaient 404 (logo de l'établissement invisible).
+# WhiteNoise ne sert que les fichiers statiques, pas les fichiers envoyés
+# par les utilisateurs. Suffisant pour ce volume ; à grande échelle, on
+# confierait /media/ au serveur web (Nginx) ou à un stockage objet.
+if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 else:
-    # static() ne fait rien quand DEBUG=False : sans cette route, les photos
-    # de profil et manuels PDF seraient introuvables en production.
-    # WhiteNoise ne sert que les fichiers statiques, pas les fichiers envoyés
-    # par les utilisateurs. Suffisant pour ce volume ; à grande échelle, on
-    # confierait /media/ au serveur web (Nginx) ou à un stockage objet.
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
     ]
