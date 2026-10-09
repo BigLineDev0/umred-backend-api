@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{{ sujet }}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f5fa;-webkit-text-size-adjust:100%;">
+{# Aperçu affiché par les messageries sous l'objet, masqué dans le corps. #}
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{{ apercu }}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f3f5fa;">
+  <tr>
+    <td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+        <tr>
+          <td style="padding:0 4px 16px 4px;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;color:#0b1437;">
+            <span style="color:{{ couleur }};">Sen</span>Lab{% if etablissement %}<span style="font-weight:normal;color:#6b7280;font-size:14px;">&nbsp;&middot;&nbsp;{{ etablissement }}</span>{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#ffffff;border:1px solid #e3e7f2;border-top:4px solid {{ couleur }};border-radius:8px;padding:32px 28px;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+            <h1 style="margin:0 0 20px 0;font-size:20px;line-height:28px;font-weight:bold;color:#0b1437;">{{ titre }}</h1>
+            <p style="margin:0 0 16px 0;font-size:15px;line-height:24px;">Bonjour {{ prenom }},</p>
+            {% for paragraphe in paragraphes %}
+            <p style="margin:0 0 16px 0;font-size:15px;line-height:24px;">{{ paragraphe|linebreaksbr }}</p>
+            {% endfor %}
+            {% if bouton %}
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+              <tr>
+                <td style="border-radius:6px;background:{{ couleur }};">
+                  <a href="{{ bouton.lien }}" style="display:inline-block;padding:12px 24px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:6px;">{{ bouton.libelle }}</a>
+                </td>
+              </tr>
+            </table>
+            <p style="margin:0 0 16px 0;font-size:13px;line-height:20px;color:#6b7280;">Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :<br><a href="{{ bouton.lien }}" style="color:{{ couleur }};word-break:break-all;">{{ bouton.lien }}</a></p>
+            {% endif %}
+            {% if note %}
+            <p style="margin:16px 0 0 0;padding:12px 14px;background:#f3f5fa;border-radius:6px;font-size:13px;line-height:20px;color:#4b5563;">{{ note }}</p>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 4px 0 4px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#6b7280;">
+            Message envoyé automatiquement par SenLab{% if etablissement %} pour {{ etablissement }}{% endif %}. Merci de ne pas y répondre.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

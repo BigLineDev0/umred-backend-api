@@ -1,43 +1,32 @@
-from django.core.mail import send_mail
 from django.conf import settings
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+
+from apps.notifications.emails import envoyer_email
 
 
 def envoyer_lien_definition_mdp(utilisateur, jeton: str):
     lien = f'{settings.FRONTEND_URL}/definir-mot-de-passe/{jeton}'
-    message = (
-        f'Bonjour {utilisateur.prenom},\n\n'
-        f"Un compte vient d'être créé pour vous sur la plateforme SenLab.\n\n"
-        f'Cliquez sur ce lien pour choisir votre mot de passe et activer votre accès :\n{lien}\n\n'
-        f'Ce lien est valable 3 jours.\n\n'
-        f"L'équipe SenLab"
-    )
-    send_mail(
-        subject='Activez votre compte SenLab',
-        message=message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[utilisateur.email],
-        fail_silently=False,
+    etablissement = f' par {utilisateur.organisation.nom}' if utilisateur.organisation else ''
+    envoyer_email(
+        utilisateur, 'Activez votre compte SenLab',
+        [f"Un compte vient d'être créé pour vous sur la plateforme SenLab{etablissement}.",
+         'Choisissez votre mot de passe pour activer votre accès.'],
+        titre='Bienvenue sur SenLab',
+        bouton=('Choisir mon mot de passe', lien),
+        note='Ce lien est valable 3 jours.',
     )
 
 
 def envoyer_lien_reinitialisation_mdp(utilisateur, jeton: str):
     # Même page frontend que l'invitation : seul le texte de l'email change.
     lien = f'{settings.FRONTEND_URL}/definir-mot-de-passe/{jeton}'
-    message = (
-        f'Bonjour {utilisateur.prenom},\n\n'
-        f'Une réinitialisation de mot de passe a été demandée pour votre compte SenLab.\n\n'
-        f'Cliquez sur ce lien pour choisir un nouveau mot de passe :\n{lien}\n\n'
-        f'Ce lien est valable 1 heure. Si vous n\'êtes pas à l\'origine de cette demande, '
-        f'ignorez cet email : votre mot de passe actuel reste inchangé.\n\n'
-        f"L'équipe SenLab"
-    )
-    send_mail(
-        subject='Réinitialisation de votre mot de passe SenLab',
-        message=message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[utilisateur.email],
-        fail_silently=False,
+    envoyer_email(
+        utilisateur, 'Réinitialisation de votre mot de passe SenLab',
+        ['Une réinitialisation de mot de passe a été demandée pour votre compte SenLab.'],
+        titre='Réinitialiser votre mot de passe',
+        bouton=('Choisir un nouveau mot de passe', lien),
+        note="Ce lien est valable 1 heure. Si vous n'êtes pas à l'origine de cette demande, "
+             'ignorez cet email : votre mot de passe actuel reste inchangé.',
     )
 
 
@@ -46,20 +35,14 @@ def envoyer_lien_activation(utilisateur, jeton: str):
     # la personne qui s'inscrit ; le compte reste bloqué tant qu'il n'est
     # pas cliqué.
     lien = f'{settings.FRONTEND_URL}/activer-compte/{jeton}'
-    message = (
-        f'Bonjour {utilisateur.prenom},\n\n'
-        f'Merci pour votre inscription sur la plateforme SenLab.\n\n'
-        f'Cliquez sur ce lien pour confirmer votre adresse email et activer votre compte :\n{lien}\n\n'
-        f'Ce lien est valable 24 heures. Si vous n\'êtes pas à l\'origine de cette inscription, '
-        f'ignorez cet email : aucun compte ne sera activé.\n\n'
-        f"L'équipe SenLab"
-    )
-    send_mail(
-        subject='Confirmez votre adresse email SenLab',
-        message=message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[utilisateur.email],
-        fail_silently=False,
+    envoyer_email(
+        utilisateur, 'Confirmez votre adresse email SenLab',
+        ['Merci pour votre inscription sur la plateforme SenLab.',
+         'Confirmez votre adresse email pour activer votre compte.'],
+        titre='Confirmez votre adresse email',
+        bouton=('Confirmer mon adresse', lien),
+        note="Ce lien est valable 24 heures. Si vous n'êtes pas à l'origine de cette inscription, "
+             'ignorez cet email : aucun compte ne sera activé.',
     )
 
 

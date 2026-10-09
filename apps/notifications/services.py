@@ -2,8 +2,8 @@ import logging
 
 import httpx
 from django.conf import settings
-from django.core.mail import send_mail
 
+from .emails import envoyer_email as envoyer_email_mis_en_page
 from .models import Notification
 
 logger = logging.getLogger(__name__)
@@ -34,13 +34,11 @@ def envoyer_email(destinataire, sujet, message):
     """
     if not destinataire.email:
         return
-    corps = (
-        f"Bonjour {destinataire.prenom},\n\n{message}\n\n"
-        f"Retrouvez le détail sur la plateforme : {settings.FRONTEND_URL}\n\n"
-        f"Cet email est envoyé automatiquement, merci de ne pas y répondre."
-    )
     try:
-        send_mail(sujet, corps, settings.DEFAULT_FROM_EMAIL, [destinataire.email], fail_silently=False)
+        envoyer_email_mis_en_page(
+            destinataire, sujet, message.split('\n\n'),
+            bouton=('Ouvrir SenLab', settings.FRONTEND_URL),
+        )
     except Exception:
         logger.exception("Échec d'envoi de l'email « %s » à %s", sujet, destinataire.email)
 

@@ -1,0 +1,13 @@
+{% autoescape off %}{{ titre }}
+
+Bonjour {{ prenom }},
+{% for paragraphe in paragraphes %}
+{{ paragraphe }}
+{% endfor %}{% if bouton %}
+{{ bouton.libelle }} : {{ bouton.lien }}
+{% endif %}{% if note %}
+{{ note }}
+{% endif %}
+--
+Message envoyé automatiquement par SenLab{% if etablissement %} pour {{ etablissement }}{% endif %}. Merci de ne pas y répondre.
+{% endautoescape %}
