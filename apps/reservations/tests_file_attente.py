@@ -7,7 +7,7 @@ from rest_framework.test import APITestCase
 from apps.equipements.models import Equipement, StatutEquipement
 from apps.laboratoires.models import Laboratoire
 from apps.notifications.models import Notification
-from apps.organisations.models import Organisation
+from apps.organisations.models import HoraireJour, Organisation
 from apps.projets.models import NiveauPriorite, Projet
 from apps.utilisateurs.models import Role, StatutAcademique, Utilisateur
 
@@ -193,6 +193,49 @@ class DureeEtVerificationTests(Base):
         self.assertEqual([e['id'] for e in equivalents], [libre.id])
         self.assertEqual(equivalents[0]['remplace'], self.equipement.id)
 
+
+class AlternativesHorairesEtConflitPartielTests(Base):
+    """Créneaux proposés en cas de conflit : horaires par jour et sélection multiple."""
+
+    def setUp(self):
+        super().setUp()
+        # Le lendemain du jour demandé est fermé (ex. un dimanche).
+        self.jour_ferme = self.demain + timedelta(days=1)
+        HoraireJour.objects.create(organisation=self.org, jour=self.jour_ferme.weekday(), ferme=True)
+        self.centrifugeuse = Equipement.objects.create(
+            laboratoire=self.labo, nom='Centrifugeuse', numero_serie='C-1', categorie='Centrifugeuse',
+        )
+        # Microscope pris toute la journée demandée : les alternatives
+        # tombent forcément un autre jour.
+        self.existante(self.autre_chercheur, StatutReservation.VALIDEE, debut=8, fin=19)
+
+    def verifier(self, **extra):
+        self.client.force_authenticate(self.etudiant)
+        return self.client.post('/api/reservations/verifier/', self.payload(**extra), format='json').data
+
+    def test_jour_ferme_jamais_propose(self):
+        dates = {c['date'] for c in self.verifier()['alternatives']['creneaux']}
+        self.assertTrue(dates)
+        self.assertNotIn(self.jour_ferme.isoformat(), dates)
+
+    def test_amplitude_du_jour_respectee(self):
+        # Le surlendemain ferme à 12h : 10h-12h y tient, mais pas 14h-16h.
+        surlendemain = self.demain + timedelta(days=2)
+        HoraireJour.objects.create(organisation=self.org, jour=surlendemain.weekday(),
+                                   heure_ouverture=time(8), heure_fermeture=time(12))
+        for c in self.verifier(heure_debut='14:00', heure_fin='16:00')['alternatives']['creneaux']:
+            if c['date'] == surlendemain.isoformat():
+                self.assertLessEqual(c['heure_fin'], '12:00')
+
+    def test_conflit_partiel_propose_de_reserver_les_equipements_libres(self):
+        partielle = self.verifier(equipements=[self.equipement.id, self.centrifugeuse.id])['alternatives']['reservation_partielle']
+        self.assertEqual(partielle['libres'], [{'id': self.centrifugeuse.id, 'nom': 'Centrifugeuse'}])
+        self.assertEqual(partielle['occupes'], [{'id': self.equipement.id, 'nom': 'Microscope 1'}])
+        self.assertTrue(partielle['creneaux_occupes'])
+        self.assertNotIn(self.jour_ferme.isoformat(), {c['date'] for c in partielle['creneaux_occupes']})
+
+    def test_conflit_total_sans_reservation_partielle(self):
+        self.assertIsNone(self.verifier()['alternatives']['reservation_partielle'])
 
 class LiberationCreneauTests(Base):
     def test_annulation_previent_la_liste_d_attente(self):

@@ -19,7 +19,7 @@ from .models import AlerteCreneau, Reservation, StatutReservation, STATUTS_BLOQU
 from .serializers import AlerteCreneauSerializer, RefusSerializer, ReservationSerializer
 from .services import (
     analyser_file, conflits_detailles, creer_alerte, equipements_equivalents, liberer_creneau,
-    proposer_creneaux, validateurs_pour,
+    proposer_creneaux, reservation_partielle, validateurs_pour,
 )
 
 ROLES_SUPERVISEURS = [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
@@ -171,6 +171,10 @@ class ReservationViewSet(viewsets.ModelViewSet):
             'equipements_equivalents': equipements_equivalents(
                 reservation.laboratoire, equipements, conflits,
                 reservation.date, reservation.heure_debut, reservation.heure_fin,
+            ),
+            'reservation_partielle': reservation_partielle(
+                equipements, conflits, reservation.date, reservation.heure_debut, reservation.heure_fin,
+                reservation.regles,
             ),
         }
 

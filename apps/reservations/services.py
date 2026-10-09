@@ -53,15 +53,21 @@ def plages_libres(equipements_ids, jour, regles, apres=None):
     curseur avance de l'ouverture vers la fermeture ; chaque « trou » entre
     le curseur et l'occupation suivante est une plage libre. max() gère les
     occupations qui se chevauchent (le curseur ne recule jamais).
+
+    L'amplitude est celle du jour de la semaine (horaires par jour de
+    l'établissement) : un jour fermé n'a aucune plage libre.
     """
+    ferme, ouverture, fermeture = regles.jour(jour.weekday())
+    if ferme:
+        return []
     occupations = Reservation.objects.filter(
         equipements__id__in=equipements_ids, date=jour, statut__in=STATUTS_BLOQUANTS,
     ).values_list('heure_debut', 'heure_fin').distinct().order_by('heure_debut')
 
-    curseur = _minutes(regles.heure_ouverture)
+    curseur = _minutes(ouverture)
     if apres is not None:
         curseur = max(curseur, apres)
-    fermeture = _minutes(regles.heure_fermeture)
+    fermeture = _minutes(fermeture)
     libres = []
     for debut, fin in occupations:
         debut, fin = _minutes(debut), _minutes(fin)
@@ -146,6 +152,29 @@ def conflits_detailles(equipements, date, heure_debut, heure_fin):
                     'heure_fin': r.heure_fin.strftime('%H:%M'),
                 })
     return conflits
+
+
+def reservation_partielle(equipements, conflits, date, heure_debut, heure_fin, regles):
+    """
+    Conflit PARTIEL (une partie seulement des équipements demandés est
+    prise) : les équipements libres peuvent être réservés tout de suite sur
+    le créneau demandé, et les occupés à part, sur leurs propres créneaux.
+
+    Ce n'est qu'une option parmi d'autres : une réservation regroupe
+    normalement des équipements utilisés ensemble, d'où la priorité donnée
+    à l'équivalent (même créneau) et au créneau commun. On ne scinde donc
+    jamais d'office ; l'utilisateur choisit. None si le conflit est total.
+    """
+    occupes_ids = {c['equipement_id'] for c in conflits}
+    libres = [e for e in equipements if e.id not in occupes_ids]
+    occupes = [e for e in equipements if e.id in occupes_ids]
+    if not libres or not occupes:
+        return None
+    return {
+        'libres': [{'id': e.id, 'nom': e.nom} for e in libres],
+        'occupes': [{'id': e.id, 'nom': e.nom} for e in occupes],
+        'creneaux_occupes': proposer_creneaux([e.id for e in occupes], date, heure_debut, heure_fin, regles),
+    }
 
 
 def equipements_equivalents(laboratoire, equipements, conflits, date, heure_debut, heure_fin):
