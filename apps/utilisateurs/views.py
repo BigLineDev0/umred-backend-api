@@ -9,7 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.utilisateurs.models import Role, Utilisateur, JetonDefinitionMotDePasse, MotifJeton, StatutCompte
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from .serializers import (
-    MonProfilUpdateSerializer, UmredTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer,
+    AssignationEncadrantSerializer, MonProfilUpdateSerializer, UmredTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer,
     UtilisateurSerializer, DefinirMotDePasseSerializer, ChangerMotDePasseSerializer, MotDePasseOublieSerializer,
     ActiverCompteSerializer, verifier_robustesse,
 )
@@ -18,6 +18,8 @@ from rest_framework import generics, mixins, permissions, status
 from rest_framework.response import Response
 from rest_framework import viewsets
 from apps.core.services import enregistrer as journaliser
+from apps.notifications.models import TypeNotification
+from apps.notifications.services import notifier
 from apps.organisations.isolation import filtrer_par_organisation
 from .services import (
     envoyer_lien_definition_mdp, envoyer_lien_reinitialisation_mdp, envoyer_lien_activation, revoquer_sessions,
@@ -134,6 +136,46 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
             role=Role.CHERCHEUR, statut_compte=StatutCompte.ACTIF,
         )
         return Response([{'id': u.id, 'nom_complet': u.nom_complet} for u in encadrants])
+
+    @action(detail=False, methods=['post'])
+    def assigner_encadrant(self, request):
+        """
+        Assignation groupée d'un encadrant (ou retrait, encadrant = null).
+        Tout ou rien : un identifiant inconnu, hors établissement ou qui
+        n'est pas un étudiant refuse l'ensemble de la demande. L'encadrant
+        est prévenu par une notification.
+        """
+        comptes = filtrer_par_organisation(Utilisateur.objects.all(), request.user)
+        serializer = AssignationEncadrantSerializer(
+            data=request.data,
+            encadrants=comptes.filter(role=Role.CHERCHEUR, statut_compte=StatutCompte.ACTIF),
+            etudiants=comptes.filter(role=Role.ETUDIANT),
+        )
+        serializer.is_valid(raise_exception=True)
+        encadrant = serializer.validated_data['encadrant']
+        etudiants = serializer.validated_data['etudiants']
+        a_modifier = [e for e in etudiants if e.encadrant_id != (encadrant.id if encadrant else None)]
+
+        with transaction.atomic():
+            Utilisateur.objects.filter(pk__in=[e.pk for e in a_modifier]).update(encadrant=encadrant)
+            for etudiant in a_modifier:
+                journaliser(request.user, "Assignation d'un encadrant", etudiant,
+                            f'Encadrant : {encadrant.nom_complet}' if encadrant else 'Encadrant retiré')
+
+        if encadrant and a_modifier:
+            noms = ', '.join(e.nom_complet for e in a_modifier[:5]) + (' …' if len(a_modifier) > 5 else '')
+            nombre = len(a_modifier)
+            notifier(encadrant, 'Nouveaux étudiants encadrés',
+                     f"{nombre} étudiant{'s' if nombre > 1 else ''} vous {'ont' if nombre > 1 else 'a'} été "
+                     f"rattaché{'s' if nombre > 1 else ''} : {noms}. Vous recevrez leurs demandes de réservation.",
+                     TypeNotification.SYSTEME)
+
+        mis_a_jour = Utilisateur.objects.filter(pk__in=[e.pk for e in etudiants]).select_related('encadrant', 'organisation')
+        return Response({
+            'modifies': len(a_modifier),
+            'inchanges': len(etudiants) - len(a_modifier),
+            'etudiants': UtilisateurSerializer(mis_a_jour, many=True).data,
+        })
 
     @action(detail=True, methods=['post'])
     def activer(self, request, pk=None):

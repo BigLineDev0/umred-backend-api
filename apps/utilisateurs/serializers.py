@@ -160,6 +160,30 @@ def verifier_encadrant(attrs, instance=None):
     return attrs
 
 
+class AssignationEncadrantSerializer(serializers.Serializer):
+    """
+    Assignation groupée : plusieurs étudiants rattachés au même encadrant
+    (ou détachés, encadrant = null). Les querysets sont limités à
+    l'établissement de l'administrateur par la vue.
+    """
+    encadrant = serializers.PrimaryKeyRelatedField(queryset=Utilisateur.objects.none(), allow_null=True)
+    etudiants = serializers.PrimaryKeyRelatedField(queryset=Utilisateur.objects.none(), many=True)
+
+    MAX_ETUDIANTS = 500
+
+    def __init__(self, *args, encadrants=None, etudiants=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['encadrant'].queryset = encadrants
+        self.fields['etudiants'].child_relation.queryset = etudiants
+
+    def validate_etudiants(self, value):
+        if not value:
+            raise serializers.ValidationError("Sélectionnez au moins un étudiant.")
+        if len(value) > self.MAX_ETUDIANTS:
+            raise serializers.ValidationError(f"{self.MAX_ETUDIANTS} étudiants au plus par assignation.")
+        return list({e.id: e for e in value}.values())
+
+
 # Un admin ne crée jamais de super-admin : ce rôle est réservé à l'éditeur.
 ROLES_ETABLISSEMENT = [(r.value, r.label) for r in Role if r != Role.SUPER_ADMIN]
 

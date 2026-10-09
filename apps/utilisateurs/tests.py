@@ -4,6 +4,8 @@ from django.core.cache import cache
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.core.models import JournalActivite
+from apps.notifications.models import Notification
 from apps.organisations.models import Organisation
 from .models import Utilisateur, Role, StatutAcademique
 
@@ -292,3 +294,67 @@ class EmailInsensibleCasseTests(APITestCase):
         }, format='json')
         self.assertEqual(reponse.status_code, 400)
         self.assertIn('email', reponse.data)
+
+
+class AssignationGroupeeTests(APITestCase):
+    URL = '/api/utilisateurs/assigner_encadrant/'
+
+    def setUp(self):
+        cache.clear()
+        org = organisation_test()
+        autre_org = Organisation.objects.create(slug='autre', nom='Autre université')
+        creer = Utilisateur.objects.create_user
+        self.admin = creer(email='adm@t.sn', password='x', nom='A', prenom='A', role=Role.ADMIN, organisation=org)
+        self.prof = creer(email='prof@t.sn', password='x', nom='Ndiaye', prenom='Moussa', role=Role.CHERCHEUR, organisation=org)
+        self.prof.activer_compte()
+        self.etudiants = [creer(email=f'e{i}@t.sn', password='x', nom=f'E{i}', prenom='Etu', role=Role.ETUDIANT,
+                                organisation=org) for i in range(3)]
+        self.technicien = creer(email='tech@t.sn', password='x', nom='T', prenom='T', role=Role.TECHNICIEN, organisation=org)
+        self.etranger = creer(email='x@autre.sn', password='x', nom='X', prenom='X', role=Role.ETUDIANT, organisation=autre_org)
+        self.client.force_authenticate(self.admin)
+
+    def assigner(self, etudiants, encadrant='prof'):
+        encadrant = self.prof.id if encadrant == 'prof' else encadrant
+        return self.client.post(self.URL, {'encadrant': encadrant, 'etudiants': [e.id for e in etudiants]}, format='json')
+
+    def test_assigne_plusieurs_etudiants_et_notifie_l_encadrant(self):
+        reponse = self.assigner(self.etudiants)
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual((reponse.data['modifies'], reponse.data['inchanges']), (3, 0))
+        self.assertEqual(self.prof.etudiants_encadres.count(), 3)
+        notification = Notification.objects.get(destinataire=self.prof)
+        self.assertIn('3 étudiants vous ont été rattachés', notification.message)
+        self.assertEqual(JournalActivite.objects.filter(action="Assignation d'un encadrant").count(), 3)
+
+    def test_etudiants_deja_rattaches_comptes_inchanges(self):
+        self.assigner(self.etudiants[:1])
+        reponse = self.assigner(self.etudiants)
+        self.assertEqual((reponse.data['modifies'], reponse.data['inchanges']), (2, 1))
+
+    def test_retrait_groupe_de_l_encadrant(self):
+        self.assigner(self.etudiants)
+        reponse = self.assigner(self.etudiants, encadrant=None)
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(self.prof.etudiants_encadres.count(), 0)
+
+    def test_tout_ou_rien_si_un_compte_n_est_pas_un_etudiant(self):
+        reponse = self.assigner([*self.etudiants, self.technicien])
+        self.assertEqual(reponse.status_code, 400)
+        self.assertEqual(self.prof.etudiants_encadres.count(), 0)
+
+    def test_etudiant_d_un_autre_etablissement_refuse(self):
+        self.assertEqual(self.assigner([self.etranger]).status_code, 400)
+        self.etranger.refresh_from_db()
+        self.assertIsNone(self.etranger.encadrant)
+
+    def test_encadrant_doit_etre_un_chercheur_actif(self):
+        self.assertEqual(self.assigner(self.etudiants, encadrant=self.technicien.id).status_code, 400)
+        self.prof.desactiver_compte()
+        self.assertEqual(self.assigner(self.etudiants).status_code, 400)
+
+    def test_liste_vide_refusee(self):
+        self.assertEqual(self.assigner([]).status_code, 400)
+
+    def test_reserve_aux_administrateurs(self):
+        self.client.force_authenticate(self.prof)
+        self.assertEqual(self.assigner(self.etudiants).status_code, 403)
