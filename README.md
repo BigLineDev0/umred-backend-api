@@ -484,7 +484,7 @@ DATABASE_URL=sqlite:///test.sqlite3 python manage.py test   # sans serveur Postg
 python manage.py test apps.reservations     # une seule application
 ```
 
-La suite compte **217 tests**. Elle couvre notamment :
+La suite compte **222 tests**. Elle couvre notamment :
 
 - l'authentification, l'activation et la suspension ;
 - les règles de création et de validation des réservations ;
