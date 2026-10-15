@@ -8,9 +8,9 @@
 #   api.senlab.site -> backend    (127.0.0.1:8010)
 #   ia.senlab.site  -> service IA (127.0.0.1:8011)
 
-# Nom de projet explicite : sans lui, Compose prend le nom du dossier
-# ("backend"), déjà utilisé sur le VPS par Sama Terrain. Les deux stacks
-# se confondraient (services remplacés, conteneurs vus comme orphelins).
+# Nom de projet explicite : sans lui, Compose prendrait le nom du dossier
+# (« backend »), trop générique, et pourrait confondre cette pile avec une
+# autre hébergée sur le même serveur.
 name: senlab
 
 # Configuration commune au backend et au planificateur.
@@ -19,7 +19,6 @@ x-backend-env: &backend-env
   # le conteneur "db", joignable par son nom de service.
   DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
   # Le service IA expose ses routes sous /api (ex. /api/pilotage/synthese).
-  IA_SERVICE_URL: http://ia:8001/api
   DEBUG: "False"
   ENABLE_API_DOCS: "True"
   # "backend" : nom d'hôte utilisé par le service IA pour appeler l'API.
@@ -72,18 +71,16 @@ services:
     ports:
       - "127.0.0.1:8010:8000"
     volumes:
-      # Les fichiers uploadés (photos de terrains, documents gérants...)
-      # survivent aux redémarrages du conteneur.
+      # Fichiers envoyés (logos, photos, manuels PDF) conservés entre deux
+      # redémarrages du conteneur.
       - media_data:/app/media
     depends_on:
       db:
         condition: service_healthy
-      ia:
-        condition: service_started
 
-  # Tâches planifiées (clôture des réservations, synthèse hebdomadaire).
-  # Même image que le backend ; ne pas activer en plus le workflow n8n
-  # équivalent, sinon les envois sont faits en double.
+  # Tâches planifiées : rappels de réservation (toutes les 5 min) et clôture
+  # des réservations passées. Même image que le backend. La synthèse
+  # hebdomadaire est orchestrée par n8n (deploiement/n8n/).
   planificateur:
     build:
       context: .
@@ -127,7 +124,9 @@ services:
     env_file:
       - ../umred-labo-ia/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # Pas de DATABASE_URL : le service IA n'a aucun accès direct à la base
+      # (il passe par l'API Django avec le JWT de l'utilisateur). Lui
+      # transmettre le mot de passe PostgreSQL l'exposait sans utilité.
       # Le téléchargement "xet" (rapide) de HuggingFace échoue parfois selon
       # le réseau : on force le téléchargement HTTP classique, plus lent
       # mais plus fiable.
@@ -138,6 +137,9 @@ services:
       # Doit être identique à la SECRET_KEY de Django (signature des JWT) :
       # reprise directement du .env du backend, aucun risque de décalage.
       JWT_SECRET_KEY: ${SECRET_KEY}
+      # Même secret que les tâches Django : autorise le workflow n8n à faire
+      # rédiger la synthèse hebdomadaire (POST /api/pilotage/synthese/rediger).
+      TACHES_TOKEN: ${TACHES_TOKEN:-}
       # Le frontend appelle directement le service IA (ia.senlab.site).
       # Format JSON attendu par le service IA, ex. ["https://senlab.site"].
       CORS_ORIGINS: ${ORIGINES_FRONTEND_IA:-["https://senlab.site"]}

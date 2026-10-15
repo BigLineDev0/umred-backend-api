@@ -57,13 +57,17 @@ class Consommable(models.Model):
         entre la quantité réelle et un champ 'statut' qu'on oublierait de
         mettre à jour à chaque mouvement.
         """
-        if self.date_peremption and self.date_peremption < timezone.now().date():
+        if self.est_perime:
             return 'PERIME'
         if self.quantite_stock <= 0:
             return 'EPUISE'
         if self.quantite_stock <= self.seuil_alerte:
             return 'STOCK_FAIBLE'
         return 'DISPONIBLE'
+
+    @property
+    def est_perime(self):
+        return bool(self.date_peremption and self.date_peremption < timezone.now().date())
 
     @property
     def peremption_proche(self):
@@ -80,6 +84,12 @@ class Consommable(models.Model):
     def retirer_stock(self, quantite, utilisateur, motif=''):
         if quantite <= 0:
             raise ValidationError("La quantité doit être positive.")
+        # Un produit périmé ne doit plus servir à une manipulation : il reste
+        # en stock (traçabilité) jusqu'à son élimination ou son remplacement.
+        if self.est_perime:
+            raise ValidationError(
+                f"Produit périmé depuis le {self.date_peremption:%d/%m/%Y} : il ne peut plus être utilisé."
+            )
         # Verrou sur la ligne + relecture de la quantité en base : deux
         # retraits simultanés s'exécutent l'un après l'autre, le second voit
         # le stock déjà diminué (pas de mise à jour perdue ni de stock

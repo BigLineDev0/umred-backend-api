@@ -1,0 +1,160 @@
+{
+  "name": "SenLab — Synthèse hebdomadaire des administrateurs",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "8a1f0c2e-1b6d-4c1a-9f10-000000000001",
+      "name": "Chaque lundi à 7 h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "api_url",
+              "value": "http://localhost:8010/api",
+              "type": "string"
+            },
+            {
+              "id": "c2",
+              "name": "ia_url",
+              "value": "http://localhost:8011/api",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8a1f0c2e-1b6d-4c1a-9f10-000000000002",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0],
+      "notes": "Local (stack Docker) : http://localhost:8010/api et http://localhost:8011/api.\nEn ligne : https://api.senlab.site/api et https://ia.senlab.site/api.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Configuration').first().json.api_url }}/taches/synthese-hebdomadaire/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "8a1f0c2e-1b6d-4c1a-9f10-000000000003",
+      "name": "Établissements et indicateurs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "notes": "Renvoie une entrée par établissement actif (n8n les traite une par une).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.ia_url }}/pilotage/synthese/rediger",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ indicateurs: $json.indicateurs }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "8a1f0c2e-1b6d-4c1a-9f10-000000000004",
+      "name": "Rédaction par le modèle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0],
+      "onError": "continueRegularOutput",
+      "notes": "En cas d'échec, le PDF est quand même produit avec la synthèse par gabarits.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.api_url }}/taches/synthese-hebdomadaire/rapport/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ organisation_id: $('Établissements et indicateurs').item.json.organisation_id, synthese: $json.synthese }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "rapport"
+            }
+          }
+        }
+      },
+      "id": "8a1f0c2e-1b6d-4c1a-9f10-000000000005",
+      "name": "Rapport PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Établissements et indicateurs').item.json.destinataires.map(d => d.email).join(',') }}",
+        "subject": "=Synthèse de la semaine — {{ $('Établissements et indicateurs').item.json.organisation }}",
+        "emailType": "html",
+        "message": "=<p>Bonjour,</p><p>Voici la synthèse de l’activité de <strong>{{ $('Établissements et indicateurs').item.json.organisation }}</strong> du {{ $('Établissements et indicateurs').item.json.periode.debut }} au {{ $('Établissements et indicateurs').item.json.periode.fin }}.</p><p>{{ ($('Rédaction par le modèle').item.json.synthese || 'La synthèse figure dans le rapport joint.').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\\n/g, '<br>') }}</p><p>Le rapport détaillé (indicateurs, occupation, recommandations, liste des réservations) est joint au format PDF.</p><p>— SenLab</p>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "SenLab",
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "rapport"
+              }
+            ]
+          }
+        }
+      },
+      "id": "8a1f0c2e-1b6d-4c1a-9f10-000000000006",
+      "name": "Envoi Gmail aux administrateurs",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1100, 0],
+      "webhookId": "8a1f0c2e-1b6d-4c1a-9f10-0000000000aa"
+    }
+  ],
+  "connections": {
+    "Chaque lundi à 7 h": {
+      "main": [[{ "node": "Configuration", "type": "main", "index": 0 }]]
+    },
+    "Configuration": {
+      "main": [[{ "node": "Établissements et indicateurs", "type": "main", "index": 0 }]]
+    },
+    "Établissements et indicateurs": {
+      "main": [[{ "node": "Rédaction par le modèle", "type": "main", "index": 0 }]]
+    },
+    "Rédaction par le modèle": {
+      "main": [[{ "node": "Rapport PDF", "type": "main", "index": 0 }]]
+    },
+    "Rapport PDF": {
+      "main": [[{ "node": "Envoi Gmail aux administrateurs", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Dakar"
+  },
+  "pinData": {}
+}

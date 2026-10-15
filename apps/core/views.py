@@ -1,5 +1,8 @@
+import logging
+
 from django.http import HttpResponse
-from rest_framework import viewsets, permissions
+from rest_framework import permissions, serializers, viewsets
+from rest_framework.views import APIView
 
 from apps.equipements.models import Equipement
 from .models import JournalActivite
@@ -26,6 +29,8 @@ from apps.organisations.isolation import filtrer_par_organisation
 import openpyxl
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
+
+logger = logging.getLogger(__name__)
 
 # Filtres communs des rapports et du pilotage, documentés dans Swagger.
 PARAMETRES_PERIODE = [
@@ -330,12 +335,98 @@ def tache_cloturer_reservations(request):
     return Response({'terminees': terminees, 'expirees': expirees})
 
 
-@extend_schema(parameters=[OpenApiParameter('X-Taches-Token', OpenApiTypes.STR, OpenApiParameter.HEADER, required=True, description='Secret TACHES_TOKEN')], request=None, responses=OpenApiTypes.OBJECT, summary='Tâche planifiée : synthèse hebdomadaire aux admins (n8n)')
+JETON_TACHES = OpenApiParameter('X-Taches-Token', OpenApiTypes.STR, OpenApiParameter.HEADER, required=True,
+                                description='Secret TACHES_TOKEN')
+
+
+@extend_schema(parameters=[JETON_TACHES], request=None, responses=OpenApiTypes.OBJECT, summary='Tâche planifiée : envoyer les rappels de réservation')
 @api_view(['POST'])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def tache_envoyer_rappels(request):
+    """Pour un hébergement sans le conteneur planificateur (qui fait déjà cet envoi toutes les 5 minutes)."""
+    if not _jeton_taches_valide(request):
+        return Response({'detail': 'Jeton de tâche invalide.'}, status=403)
+    from apps.reservations.rappels import envoyer_rappels
+    return Response({'rappels_envoyes': envoyer_rappels()})
+
+
+@extend_schema(parameters=[JETON_TACHES], responses=OpenApiTypes.OBJECT, summary='Synthèse hebdomadaire (n8n) : établissements, indicateurs et destinataires')
+@api_view(['GET'])
 @permission_classes([AllowAny])
 @authentication_classes([])
 def tache_synthese_hebdomadaire(request):
     if not _jeton_taches_valide(request):
         return Response({'detail': 'Jeton de tâche invalide.'}, status=403)
-    from apps.core.management.commands.envoyer_synthese_hebdomadaire import envoyer_syntheses
-    return Response({'syntheses_envoyees': envoyer_syntheses()})
+    from .synthese import etablissements_a_synthetiser
+    return Response(etablissements_a_synthetiser())
+
+
+@extend_schema(parameters=[JETON_TACHES], request=OpenApiTypes.OBJECT, responses={(200, 'application/pdf'): OpenApiTypes.BINARY},
+               summary='Synthèse hebdomadaire (n8n) : rapport PDF d’un établissement')
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def tache_synthese_rapport(request):
+    """Corps : {"organisation_id": int, "synthese": "texte rédigé par le service IA"}."""
+    if not _jeton_taches_valide(request):
+        return Response({'detail': 'Jeton de tâche invalide.'}, status=403)
+    from apps.organisations.models import Organisation
+    from .synthese import rapport_synthese
+    try:
+        organisation_id = int(request.data.get('organisation_id'))
+    except (TypeError, ValueError):
+        return Response({'detail': 'organisation_id entier attendu.'}, status=400)
+    organisation = Organisation.objects.filter(pk=organisation_id, est_active=True).first()
+    rapport = rapport_synthese(organisation, request.data.get('synthese')) if organisation else None
+    if rapport is None:
+        return Response({'detail': 'Établissement inconnu, suspendu ou sans administrateur actif.'}, status=404)
+    contenu, nom_fichier = rapport
+    response = HttpResponse(contenu, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{nom_fichier}"'
+    return response
+
+
+
+class ContactSerializer(serializers.Serializer):
+    SUJETS = {'acces': "Demande d'accès", 'technique': 'Signalement technique',
+              'general': 'Question générale', 'partenariat': 'Partenariat'}
+    nom = serializers.CharField(max_length=120)
+    email = serializers.EmailField()
+    sujet = serializers.ChoiceField(choices=list(SUJETS))
+    message = serializers.CharField(min_length=10, max_length=3000)
+    # Champ invisible dans le formulaire : seul un robot le remplit.
+    site_web = serializers.CharField(required=False, allow_blank=True)
+
+
+class ContactView(APIView):
+    """Formulaire de contact du site vitrine : le message part par e-mail à CONTACT_EMAIL."""
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = 'contact'
+
+    @extend_schema(request=ContactSerializer, responses=OpenApiTypes.OBJECT)
+    def post(self, request):
+        from django.conf import settings
+        from django.core.mail import EmailMessage
+
+        serializer = ContactSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+        if donnees.get('site_web'):
+            return Response({'detail': 'Message envoyé.'}, status=202)
+        if not settings.CONTACT_EMAIL:
+            return Response({'detail': "Le formulaire de contact n'est pas configuré."}, status=503)
+        sujet = ContactSerializer.SUJETS[donnees['sujet']]
+        try:
+            EmailMessage(
+                subject=f"[SenLab — contact] {sujet} — {donnees['nom']}",
+                body=f"De : {donnees['nom']} <{donnees['email']}>\nSujet : {sujet}\n\n{donnees['message']}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[settings.CONTACT_EMAIL],
+                reply_to=[donnees['email']],
+            ).send()
+        except Exception:
+            logger.exception("Échec d'envoi du message de contact")
+            return Response({'detail': "Le message n'a pas pu être envoyé. Réessayez plus tard."}, status=503)
+        return Response({'detail': 'Message envoyé.'}, status=202)

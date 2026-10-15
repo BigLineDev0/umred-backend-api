@@ -94,3 +94,36 @@ class ConsommableValidationTests(APITestCase):
 
     def test_quantite_negative_refusee(self):
         self.assertEqual(self._creer(reference='Q-1', quantite_stock='-1').status_code, 400)
+
+
+class PeremptionTests(StockTests):
+    def test_produit_perime_non_utilisable(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        self.consommable.date_peremption = timezone.localdate() - timedelta(days=1)
+        self.consommable.save()
+        with self.assertRaises(ValidationError):
+            self.consommable.retirer_stock(Decimal('1'), self.user)
+        self.consommable.refresh_from_db()
+        self.assertEqual(self.consommable.quantite_stock, Decimal('10'))
+        self.assertFalse(MouvementStock.objects.exists())
+
+    def test_retrait_refuse_par_l_api(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from rest_framework.test import APIClient
+        self.consommable.date_peremption = timezone.localdate() - timedelta(days=1)
+        self.consommable.save()
+        client = APIClient()
+        client.force_authenticate(self.user)
+        reponse = client.post(f'/api/consommables/{self.consommable.id}/retirer/', {'quantite': '1'}, format='json')
+        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('périmé', str(reponse.data))
+
+    def test_produit_perime_aujourd_hui_encore_utilisable(self):
+        from django.utils import timezone
+        self.consommable.date_peremption = timezone.localdate()
+        self.consommable.save()
+        self.consommable.retirer_stock(Decimal('1'), self.user)
+        self.consommable.refresh_from_db()
+        self.assertEqual(self.consommable.quantite_stock, Decimal('9'))

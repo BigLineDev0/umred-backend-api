@@ -358,3 +358,26 @@ class AssignationGroupeeTests(APITestCase):
     def test_reserve_aux_administrateurs(self):
         self.client.force_authenticate(self.prof)
         self.assertEqual(self.assigner(self.etudiants).status_code, 403)
+
+
+class ChangementRoleTests(APITestCase):
+    def setUp(self):
+        from apps.organisations.models import Organisation
+        org = Organisation.objects.create(nom='Org', slug='org-roles')
+        self.admin = Utilisateur.objects.create_user(email='admin@org.sn', password='x', nom='A', prenom='A',
+                                                     role=Role.ADMIN, organisation=org)
+        self.technicien = Utilisateur.objects.create_user(email='tech@org.sn', password='x', nom='T', prenom='T',
+                                                          role=Role.TECHNICIEN, organisation=org)
+        self.client.force_authenticate(self.admin)
+
+    def test_un_admin_ne_modifie_pas_son_propre_role(self):
+        reponse = self.client.patch(f'/api/utilisateurs/{self.admin.id}/', {'role': Role.TECHNICIEN}, format='json')
+        self.assertEqual(reponse.status_code, 400)
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.role, Role.ADMIN)
+
+    def test_un_admin_modifie_le_role_d_un_autre_compte(self):
+        reponse = self.client.patch(f'/api/utilisateurs/{self.technicien.id}/', {'role': Role.CHERCHEUR}, format='json')
+        self.assertEqual(reponse.status_code, 200)
+        self.technicien.refresh_from_db()
+        self.assertEqual(self.technicien.role, Role.CHERCHEUR)

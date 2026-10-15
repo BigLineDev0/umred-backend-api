@@ -38,7 +38,7 @@ RANG_STATUT_ACADEMIQUE = {
 class UtilisateurManager(BaseUserManager):
 
     # Les emails sont stockés en minuscules et recherchés sans tenir compte
-    # de la casse : « Awa@umred.sn » et « awa@umred.sn » désignent le même
+    # de la casse : « Awa@exemple.sn » et « awa@exemple.sn » désignent le même
     # compte (impossible d'en créer deux, connexion possible dans les deux cas).
     def get_by_natural_key(self, email):
         return self.get(email__iexact=email)

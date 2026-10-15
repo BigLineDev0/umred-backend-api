@@ -33,10 +33,6 @@ echo "Collecte des fichiers statiques..."
 python manage.py collectstatic --noinput
 
 echo "Démarrage du serveur..."
-# --reload : redémarre automatiquement quand un fichier .py change (pratique
-# en dev grâce au volume monté sur le code). À retirer en production.
-# --timeout 75 : le proxy vers le service IA (chatbot) peut attendre
-# jusqu'à 60s une réponse du LLM (voir gerant/views.py ChatbotView) ; le
-# timeout par défaut de Gunicorn (30s) tuait le worker avant la fin de
-# cette requête, provoquant une 500 côté frontend.
-exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 75
+# --timeout 60 : marge pour les exports PDF et Excel sur de longues périodes
+# (30 s par défaut).
+exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 60

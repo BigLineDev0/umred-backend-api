@@ -1,4 +1,5 @@
-from rest_framework import viewsets, permissions
+from rest_framework import permissions, status, viewsets
+from rest_framework.response import Response
 from apps.organisations.isolation import filtrer_par_organisation
 from apps.utilisateurs.models import Role
 from .models import Projet
@@ -39,8 +40,13 @@ class ProjetViewSet(viewsets.ModelViewSet):
         # Un étudiant voit aussi les projets de son encadrant (pour y rattacher ses réservations).
         return qs.filter(Q(responsable=user) | Q(responsable_id=user.encadrant_id) if user.encadrant_id else Q(responsable=user))
 
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
         # Le responsable est toujours l'utilisateur connecté (jamais lu dans
         # la requête) et la priorité reste NORMALE : seul un admin peut
         # l'élever ensuite, car elle influe sur l'arbitrage des conflits.
-        serializer.save(responsable=self.request.user)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        projet = serializer.save(responsable=request.user)
+        # Réponse complète (id, priorité…) : le formulaire de réservation
+        # présélectionne aussitôt le projet créé.
+        return Response(ProjetSerializer(projet).data, status=status.HTTP_201_CREATED)

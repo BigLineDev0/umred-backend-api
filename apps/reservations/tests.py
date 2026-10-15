@@ -130,10 +130,6 @@ class ConfidentialiteEtProjetTests(ReservationTests):
         self.assertEqual(self.reserver(self.etudiant, projet=projet.id).status_code, 400)
         self.assertEqual(self.reserver(self.chercheur, projet=projet.id).status_code, 201)
 
-    def test_rappels_reserves_a_l_admin(self):
-        self.client.force_authenticate(self.technicien)
-        self.assertEqual(self.client.get('/api/reservations/a_rappeler_24h/').status_code, 403)
-
     def test_horaires_incoherents_400(self):
         self.assertEqual(self.reserver(self.chercheur, heure_debut='12:00', heure_fin='10:00').status_code, 400)
 

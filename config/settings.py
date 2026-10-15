@@ -57,7 +57,6 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-INTERNAL_IPS = ['127.0.0.1']
 
 ROOT_URLCONF = 'config.urls'
 
@@ -82,7 +81,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 AUTH_USER_MODEL = 'utilisateurs.Utilisateur'
 
 DATABASES = {
-    'default': env.db('DATABASE_URL', default='postgres://umred:umred@localhost:5432/umred_labo')
+    'default': env.db('DATABASE_URL', default='postgres://senlab:senlab@localhost:5432/senlab')
 }
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -155,6 +154,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/min',
         'auth': '10/min',
+        'contact': '5/hour',
     },
 }
 
@@ -164,7 +164,7 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.0',
 }
 
-# -- Dure des tokens
+# --- Durée de vie des jetons JWT ---
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
@@ -175,11 +175,8 @@ SIMPLE_JWT = {
 # --- CORS (pour Angular en localhost:4200) ---
 CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=['http://localhost:4200'])
 
-# --- Celery / Redis ---
-CELERY_BROKER_URL = env('REDIS_URL', default='redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://localhost:6379/0')
 
-# --- Envoi mail pour l'instant dans la console
+# --- E-mails (console par défaut, SMTP ou Brevo en production) ---
 EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
 EMAIL_HOST = env('EMAIL_HOST', default='')
 EMAIL_PORT = env.int('EMAIL_PORT', default=587)
@@ -187,6 +184,11 @@ EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
 EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='SenLab <no-reply@senlab.sn>')
+# Les emails partent pendant la requête (validation, annulation...). Sans
+# délai, un serveur SMTP muet bloquait un worker Gunicorn jusqu'à son
+# timeout (60 s) : avec 3 workers, l'API entière et l'assistant IA
+# pouvaient être paralysés. L'envoi reste « best-effort » (voir notifications).
+EMAIL_TIMEOUT = env.int('EMAIL_TIMEOUT', default=10)
 
 # Envoi par API HTTP (Brevo) : à utiliser là où les ports SMTP sont bloqués
 # (Render gratuit bloque 25, 465 et 587). Activé avec
@@ -194,9 +196,9 @@ DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='SenLab <no-reply@senlab.
 ANYMAIL = {'BREVO_API_KEY': env('BREVO_API_KEY', default='')}
 
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:4200')
+# Destinataire des messages du formulaire de contact du site vitrine.
+CONTACT_EMAIL = env('CONTACT_EMAIL', default=EMAIL_HOST_USER)
 
-# Service IA (FastAPI) : rédige la synthèse hebdomadaire en langage naturel.
-IA_SERVICE_URL = env('IA_SERVICE_URL', default='http://localhost:8001/api')
 
 # Secret partagé avec n8n pour déclencher les tâches planifiées
 # (/api/taches/...). Vide = tâches désactivées.

@@ -41,7 +41,7 @@ def verifier_email_unique(email, instance=None):
     return email
 
 
-class UmredTokenObtainPairSerializer(TokenObtainPairSerializer):
+class SenlabTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -215,7 +215,21 @@ class UtilisateurSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
         return valider_telephone_senegal(value)
 
     def validate(self, attrs):
+        verifier_changement_role(attrs, self.instance, self.context.get('request'))
         return verifier_encadrant(attrs, self.instance)
+
+
+def verifier_changement_role(attrs, instance, request):
+    """
+    Un administrateur ne modifie pas son propre rôle : il perdrait l'accès à la
+    gestion des comptes, et l'établissement pourrait se retrouver sans
+    administrateur.
+    """
+    nouveau = attrs.get('role')
+    if instance is None or nouveau is None or nouveau == instance.role:
+        return
+    if request is not None and instance.pk == request.user.pk:
+        raise serializers.ValidationError({'role': "Vous ne pouvez pas modifier votre propre rôle."})
 
 
 class UtilisateurCreateSerializer(ChampsOrganisationMixin, serializers.ModelSerializer):

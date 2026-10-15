@@ -3,7 +3,7 @@ from io import BytesIO
 
 import openpyxl
 from django.core.cache import cache
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -42,14 +42,45 @@ class ExportExcelTests(APITestCase):
 
 
 class SyntheseIAValidationTests(SimpleTestCase):
-    """Le texte renvoyé par le service IA n'est utilisé que s'il a la forme attendue."""
+    """Le texte reçu de n8n (rédigé par le service IA) n'est utilisé que s'il a la forme attendue."""
 
     def test_synthese_correcte_acceptee(self):
-        from .management.commands.envoyer_synthese_hebdomadaire import synthese_valide
-        self.assertEqual(synthese_valide({'synthese': '  Semaine calme.  '}), 'Semaine calme.')
+        from .synthese import synthese_valide
+        self.assertEqual(synthese_valide('  Semaine calme.  '), 'Semaine calme.')
 
-    def test_reponses_invalides_refusees(self):
-        from .management.commands.envoyer_synthese_hebdomadaire import LONGUEUR_MAX_SYNTHESE, synthese_valide
-        for donnees in [None, [], {}, {'synthese': None}, {'synthese': 42}, {'synthese': '   '},
-                        {'synthese': 'x' * (LONGUEUR_MAX_SYNTHESE + 1)}]:
-            self.assertIsNone(synthese_valide(donnees), donnees)
+    def test_textes_invalides_refuses(self):
+        from .synthese import LONGUEUR_MAX_SYNTHESE, synthese_valide
+        for texte in [None, [], {}, 42, '   ', 'x' * (LONGUEUR_MAX_SYNTHESE + 1)]:
+            self.assertIsNone(synthese_valide(texte), texte)
+
+
+@override_settings(CONTACT_EMAIL='contact@senlab.test')
+class ContactTests(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.donnees = {'nom': 'Awa Diop', 'email': 'awa@exemple.sn', 'sujet': 'acces',
+                        'message': 'Je souhaite ouvrir un accès pour mon laboratoire.'}
+
+    def test_message_envoye_avec_reponse_a_l_expediteur(self):
+        from django.core import mail
+        reponse = self.client.post('/api/contact/', self.donnees, format='json')
+        self.assertEqual(reponse.status_code, 202)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ['contact@senlab.test'])
+        self.assertEqual(mail.outbox[0].reply_to, ['awa@exemple.sn'])
+        self.assertIn('Je souhaite ouvrir un accès', mail.outbox[0].body)
+
+    def test_robot_ignore_sans_envoi(self):
+        from django.core import mail
+        reponse = self.client.post('/api/contact/', {**self.donnees, 'site_web': 'http://spam.example'}, format='json')
+        self.assertEqual(reponse.status_code, 202)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_message_trop_court_refuse(self):
+        reponse = self.client.post('/api/contact/', {**self.donnees, 'message': 'Salut'}, format='json')
+        self.assertEqual(reponse.status_code, 400)
+
+    @override_settings(CONTACT_EMAIL='')
+    def test_formulaire_non_configure(self):
+        self.assertEqual(self.client.post('/api/contact/', self.donnees, format='json').status_code, 503)

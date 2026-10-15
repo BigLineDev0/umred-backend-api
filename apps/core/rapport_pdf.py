@@ -9,7 +9,7 @@ from pathlib import Path
 from django.utils import timezone
 from PIL import Image as PILImage
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
@@ -95,7 +95,8 @@ def _p(texte, style):
     return Paragraph(escape(str(texte)), style)
 
 
-def generer_rapport_pdf(indicateurs, reservations, organisation=None, laboratoire_nom=None, auteur=None):
+def generer_rapport_pdf(indicateurs, reservations, organisation=None, laboratoire_nom=None, auteur=None,
+                        synthese=None):
     tampon = BytesIO()
     nom_etablissement = organisation.nom if organisation else MARQUE
     doc = SimpleDocTemplate(
@@ -104,7 +105,6 @@ def generer_rapport_pdf(indicateurs, reservations, organisation=None, laboratoir
     )
     couleur = colors.HexColor(organisation.couleur_primaire if organisation else '#1848D9')
     styles = getSampleStyleSheet()
-    titre = ParagraphStyle('titre', parent=styles['Title'], alignment=TA_LEFT, textColor=couleur, fontSize=18)
     # keepWithNext : un titre de section ne reste jamais seul en bas de page.
     h2 = ParagraphStyle('h2', parent=styles['Heading2'], textColor=couleur, spaceBefore=12, spaceAfter=6,
                         keepWithNext=1)
@@ -184,6 +184,14 @@ def generer_rapport_pdf(indicateurs, reservations, organisation=None, laboratoir
     ]))
     elements.append(bandeau)
     elements.append(Spacer(1, 0.5 * cm))
+
+    # --- Synthèse rédigée (rapport hebdomadaire envoyé aux administrateurs) ---
+    if synthese:
+        elements.append(Paragraph('Synthèse de la semaine', h2))
+        st_synthese = ParagraphStyle('synthese', parent=normal, fontSize=10, leading=14, spaceAfter=6)
+        for paragraphe in synthese.split('\n\n'):
+            if paragraphe.strip():
+                elements.append(_p(paragraphe.strip(), st_synthese))
 
     # --- Indicateurs clés ---
     v = indicateurs['volumes']

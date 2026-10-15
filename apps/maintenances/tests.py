@@ -121,3 +121,20 @@ class PriseEnChargeEtSignalementTests(AnnulationMaintenanceTests):
                                    {'equipement': self.equipement.id, 'description': 'Toujours en panne'}, format='json')
         self.assertEqual(reponse.status_code, 400)
         self.assertIn('déjà signalée', reponse.data[0])
+
+
+class PerimetreTechnicienTests(AnnulationMaintenanceTests):
+    def test_le_filtre_equipement_ne_donne_pas_la_main_sur_l_intervention_d_un_collegue(self):
+        collegue = Utilisateur.objects.create_user(email='tech2@umred.sn', password='x', nom='T', prenom='T2',
+                                                   role=Role.TECHNICIEN)
+        self.maintenance.technicien = collegue
+        self.maintenance.statut = StatutMaintenance.PLANIFIEE
+        self.maintenance.save()
+        self.client.force_authenticate(self.technicien)
+        reponse = self.client.post(f'/api/maintenances/{self.maintenance.id}/annuler/?equipement={self.equipement.id}')
+        self.assertEqual(reponse.status_code, 404)
+        self.maintenance.refresh_from_db()
+        self.assertEqual(self.maintenance.statut, StatutMaintenance.PLANIFIEE)
+        # L'historique de l'équipement reste consultable.
+        liste = self.client.get(f'/api/maintenances/?equipement={self.equipement.id}')
+        self.assertEqual(liste.status_code, 200)

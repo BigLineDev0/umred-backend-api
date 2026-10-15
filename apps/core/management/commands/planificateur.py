@@ -4,19 +4,18 @@ import time
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
-from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+INTERVALLE_RAPPELS = 5 * 60   # secondes
 INTERVALLE_CLOTURE = 15 * 60  # secondes
-JOUR_SYNTHESE, HEURE_SYNTHESE = 0, 7  # lundi, 7h (heure de Dakar)
 
 
 class Command(BaseCommand):
     help = (
-        "Planificateur intégré pour Docker : clôture les réservations passées toutes les "
-        "15 minutes et envoie la synthèse hebdomadaire le lundi à 7h. Alternative au cron "
-        "ou au workflow n8n ; n'en activer qu'un seul pour éviter les envois en double."
+        "Planificateur intégré pour Docker : envoie les rappels de réservation toutes les 5 minutes "
+        "et clôture les réservations passées toutes les 15 minutes. La synthèse hebdomadaire est "
+        "orchestrée par n8n (voir deploiement/n8n/)."
     )
 
     def handle(self, *args, **options):
@@ -28,19 +27,15 @@ class Command(BaseCommand):
         signal.signal(signal.SIGTERM, arreter)
         signal.signal(signal.SIGINT, arreter)
 
-        derniere_cloture = 0.0
-        derniere_synthese = None  # date du dernier envoi
+        dernieres = {'envoyer_rappels_reservations': 0.0, 'cloturer_reservations': 0.0}
+        intervalles = {'envoyer_rappels_reservations': INTERVALLE_RAPPELS, 'cloturer_reservations': INTERVALLE_CLOTURE}
         self.stdout.write('Planificateur démarré.')
 
         while actif['valeur']:
-            maintenant = timezone.localtime()
-            if time.monotonic() - derniere_cloture >= INTERVALLE_CLOTURE:
-                self._executer('cloturer_reservations')
-                derniere_cloture = time.monotonic()
-            if (maintenant.weekday() == JOUR_SYNTHESE and maintenant.hour == HEURE_SYNTHESE
-                    and derniere_synthese != maintenant.date()):
-                self._executer('envoyer_synthese_hebdomadaire')
-                derniere_synthese = maintenant.date()
+            for commande, intervalle in intervalles.items():
+                if time.monotonic() - dernieres[commande] >= intervalle:
+                    self._executer(commande)
+                    dernieres[commande] = time.monotonic()
             time.sleep(30)
         self.stdout.write('Planificateur arrêté.')
 

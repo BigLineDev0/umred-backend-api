@@ -14,7 +14,7 @@ ROLES_SUPERVISEURS = [Role.ADMIN, Role.TECHNICIEN, Role.CHERCHEUR]
 # il doit voir que le créneau est pris et par qui, mais pas l'email, le
 # motif ni le projet de recherche du demandeur.
 CHAMPS_PRIVES = [
-    'demandeur_email', 'motif', 'motif_refus', 'projet', 'projet_nom', 'rappel_24h_envoye', 'rappel_1h_envoye',
+    'demandeur_email', 'motif', 'motif_refus', 'projet', 'projet_nom', 'projet_priorite', 'rappel_24h_envoye', 'rappel_1h_envoye',
     'annulee_par', 'annulee_par_nom', 'archivee_par', 'archivee_par_nom',
 ]
 
@@ -34,6 +34,7 @@ class ReservationSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
     demandeur_role = serializers.CharField(source='demandeur.role', read_only=True)
     equipements_noms = serializers.SerializerMethodField()
     projet_nom = serializers.CharField(source='projet.nom', read_only=True, allow_null=True)
+    projet_priorite = serializers.CharField(source='projet.niveau_priorite', read_only=True, allow_null=True)
     # Calculé par le serveur (qui a l'heure de référence) : le frontend
     # n'affiche le bouton d'annulation que si l'action est réellement permise.
     annulable = serializers.SerializerMethodField()
@@ -59,7 +60,7 @@ class ReservationSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
             'laboratoire', 'laboratoire_nom', 'equipements', 'equipements_noms',
             'demandeur_role', 'date', 'heure_debut', 'heure_fin', 'motif',
             'statut', 'motif_refus', 'est_archivee', 'date_creation', 'date_validation',
-            'projet', 'projet_nom',
+            'projet', 'projet_nom', 'projet_priorite',
             'rappel_24h_envoye', 'rappel_1h_envoye', 'annulable',
         ]
         read_only_fields = [

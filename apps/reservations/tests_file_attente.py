@@ -401,17 +401,54 @@ class CoherenceTests(Base):
         self.assertTrue(Notification.objects.filter(destinataire=self.etudiant, titre__icontains='indisponible').exists())
 
 
-class SyntheseHebdomadaireTests(Base):
-    def test_synthese_envoyee_meme_si_le_service_ia_est_injoignable(self):
+class RappelsTests(Base):
+    """Rappels 24 h / 1 h envoyés par Django (planificateur ou tâche /taches/envoyer-rappels/)."""
+
+    def creneau_dans(self, heures, statut=StatutReservation.VALIDEE, demandeur=None):
+        debut = (timezone.localtime() + timedelta(hours=heures)).replace(minute=0, second=0, microsecond=0)
+        r = Reservation.objects.create(
+            demandeur=demandeur or self.etudiant, laboratoire=self.labo, date=debut.date(),
+            heure_debut=debut.time(), heure_fin=(debut + timedelta(hours=1)).time(), motif='TP', statut=statut,
+        )
+        r.equipements.set([self.equipement])
+        return r
+
+    def test_rappel_24h_envoye_une_seule_fois(self):
         from django.core import mail
-        from django.core.management import call_command
+        from .rappels import envoyer_rappels
+        r = self.creneau_dans(24)
+        self.assertEqual(envoyer_rappels(), 1)
+        self.assertEqual(envoyer_rappels(), 0)
+        r.refresh_from_db()
+        self.assertTrue(r.rappel_24h_envoye)
+        self.assertFalse(r.rappel_1h_envoye)
+        notification = Notification.objects.get(destinataire=self.etudiant, titre='Rappel de réservation')
+        self.assertIn('Labo A (Microscope 1)', notification.message)
+        self.assertEqual([m.to for m in mail.outbox], [[self.etudiant.email]])
+
+    def test_rappel_1h(self):
+        from .rappels import envoyer_rappels
+        r = self.creneau_dans(1)
+        self.assertEqual(envoyer_rappels(), 1)
+        r.refresh_from_db()
+        self.assertTrue(r.rappel_1h_envoye)
+
+    def test_pas_de_rappel_hors_fenetre_ou_non_validee(self):
+        from .rappels import envoyer_rappels
+        self.creneau_dans(6)
+        self.creneau_dans(48)
+        self.creneau_dans(24, statut=StatutReservation.EN_ATTENTE, demandeur=self.etudiant2)
+        self.creneau_dans(1, statut=StatutReservation.ANNULEE, demandeur=self.autre_chercheur)
+        self.assertEqual(envoyer_rappels(), 0)
+        self.assertFalse(Notification.objects.filter(titre='Rappel de réservation').exists())
+
+    def test_tache_envoyer_rappels(self):
         from django.test import override_settings
-        admin = self.user('admin@ucad.sn', Role.ADMIN)
-        with override_settings(IA_SERVICE_URL='http://127.0.0.1:9/api'):
-            call_command('envoyer_synthese_hebdomadaire')
-        notification = Notification.objects.get(destinataire=admin)
-        self.assertIn('réservations ont été enregistrées', notification.message)
-        self.assertTrue(any(admin.email in m.to for m in mail.outbox))
+        self.creneau_dans(24)
+        with override_settings(TACHES_TOKEN='secret-de-test'):
+            self.assertEqual(self.client.post('/api/taches/envoyer-rappels/').status_code, 403)
+            reponse = self.client.post('/api/taches/envoyer-rappels/', HTTP_X_TACHES_TOKEN='secret-de-test')
+        self.assertEqual(reponse.data, {'rappels_envoyes': 1})
 
 
 class ProjetEncadrantTests(Base):
@@ -447,9 +484,37 @@ class TachesPlanifieesTests(Base):
             passee.refresh_from_db()
             self.assertEqual(passee.statut, StatutReservation.TERMINEE)
 
-    def test_synthese_par_n8n(self):
+    def test_synthese_n8n_liste_les_etablissements(self):
         from django.test import override_settings
-        self.user('admin@ucad.sn', Role.ADMIN)
-        with override_settings(TACHES_TOKEN='secret-de-test', IA_SERVICE_URL='http://127.0.0.1:9/api'):
-            reponse = self.client.post('/api/taches/synthese-hebdomadaire/', HTTP_X_TACHES_TOKEN='secret-de-test')
-        self.assertEqual(reponse.data['syntheses_envoyees'], 1)
+        admin = self.user('admin@ucad.sn', Role.ADMIN)
+        Organisation.objects.create(nom='Sans admin', slug='sans-admin')
+        with override_settings(TACHES_TOKEN='secret-de-test'):
+            self.assertEqual(self.client.get('/api/taches/synthese-hebdomadaire/').status_code, 403)
+            reponse = self.client.get('/api/taches/synthese-hebdomadaire/', HTTP_X_TACHES_TOKEN='secret-de-test')
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(len(reponse.data), 1)
+        entree = reponse.data[0]
+        self.assertEqual(entree['organisation_id'], self.org.id)
+        self.assertEqual(entree['destinataires'], [{'email': admin.email, 'prenom': admin.prenom, 'nom': admin.nom}])
+        self.assertIn('volumes', entree['indicateurs'])
+
+    def test_synthese_n8n_rapport_pdf_et_notification(self):
+        from django.test import override_settings
+        admin = self.user('admin@ucad.sn', Role.ADMIN)
+        url = '/api/taches/synthese-hebdomadaire/rapport/'
+        with override_settings(TACHES_TOKEN='secret-de-test'):
+            self.assertEqual(self.client.post(url, {'organisation_id': self.org.id}, format='json').status_code, 403)
+            reponse = self.client.post(url, {'organisation_id': self.org.id, 'synthese': 'Semaine calme au labo.'},
+                                       format='json', HTTP_X_TACHES_TOKEN='secret-de-test')
+            self.assertEqual(reponse.status_code, 200)
+            self.assertEqual(reponse['Content-Type'], 'application/pdf')
+            self.assertTrue(reponse.content.startswith(b'%PDF'))
+            self.assertIn('Semaine calme au labo.', Notification.objects.get(destinataire=admin).message)
+            # Texte absent ou invalide : repli sur la synthèse par gabarits.
+            self.client.post(url, {'organisation_id': self.org.id, 'synthese': '   '},
+                             format='json', HTTP_X_TACHES_TOKEN='secret-de-test')
+            self.assertIn('réservations ont été enregistrées', Notification.objects.filter(destinataire=admin).first().message)
+            inconnue = self.client.post(url, {'organisation_id': 999999}, format='json', HTTP_X_TACHES_TOKEN='secret-de-test')
+            self.assertEqual(inconnue.status_code, 404)
+            invalide = self.client.post(url, {'organisation_id': 'abc'}, format='json', HTTP_X_TACHES_TOKEN='secret-de-test')
+            self.assertEqual(invalide.status_code, 400)

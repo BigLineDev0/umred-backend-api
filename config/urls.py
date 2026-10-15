@@ -5,7 +5,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenRefreshView
 from apps.utilisateurs.views import ChangerMotDePasseView, LogoutView, MonProfilView
 
-from apps.utilisateurs.views import RegisterView, UmredTokenObtainPairView, VerifierJetonView, DefinirMotDePasseView, MotDePasseOublieView
+from apps.utilisateurs.views import RegisterView, SenlabTokenObtainPairView, VerifierJetonView, DefinirMotDePasseView, MotDePasseOublieView
 from apps.utilisateurs.views import ActiverCompteView, RenvoyerActivationView
 from apps.utilisateurs.authentication import TokenRefreshEtablissementSerializer
 
@@ -16,7 +16,7 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
 
-    path('api/auth/login/', UmredTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/auth/login/', SenlabTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/refresh/', TokenRefreshView.as_view(serializer_class=TokenRefreshEtablissementSerializer),
          name='token_refresh'),
     path('api/auth/register/', RegisterView.as_view(), name='register'),
@@ -54,12 +54,9 @@ if settings.ENABLE_API_DOCS:
     ]
 
 # Fichiers envoyés par les utilisateurs (logos, photos, manuels PDF).
-# Indépendant de la documentation de l'API : auparavant, ENABLE_API_DOCS=True
-# avec DEBUG=False passait par static(), qui ne fait rien hors DEBUG, et tous
-# les médias renvoyaient 404 (logo de l'établissement invisible).
-# WhiteNoise ne sert que les fichiers statiques, pas les fichiers envoyés
-# par les utilisateurs. Suffisant pour ce volume ; à grande échelle, on
-# confierait /media/ au serveur web (Nginx) ou à un stockage objet.
+# static() ne sert rien hors DEBUG, d'où la vue serve() en production.
+# WhiteNoise ne gère que les fichiers statiques. Suffisant pour ce volume ;
+# à plus grande échelle, confier /media/ à Nginx ou à un stockage objet.
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 else:

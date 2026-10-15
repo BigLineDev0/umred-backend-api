@@ -9,7 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.utilisateurs.models import Role, Utilisateur, JetonDefinitionMotDePasse, MotifJeton, StatutCompte
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from .serializers import (
-    AssignationEncadrantSerializer, MonProfilUpdateSerializer, UmredTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer,
+    AssignationEncadrantSerializer, MonProfilUpdateSerializer, SenlabTokenObtainPairSerializer, RegisterSerializer, UtilisateurCreateSerializer,
     UtilisateurSerializer, DefinirMotDePasseSerializer, ChangerMotDePasseSerializer, MotDePasseOublieSerializer,
     ActiverCompteSerializer, verifier_robustesse,
 )
@@ -25,7 +25,6 @@ from .services import (
     envoyer_lien_definition_mdp, envoyer_lien_reinitialisation_mdp, envoyer_lien_activation, revoquer_sessions,
 )
 
-from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
 
@@ -199,8 +198,8 @@ class UtilisateurViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
         return Response(UtilisateurSerializer(utilisateur).data)
     
     
-class UmredTokenObtainPairView(TokenObtainPairView):
-    serializer_class = UmredTokenObtainPairSerializer
+class SenlabTokenObtainPairView(TokenObtainPairView):
+    serializer_class = SenlabTokenObtainPairSerializer
     throttle_scope = 'auth'  # limite le brute-force (taux défini dans settings)
     
 

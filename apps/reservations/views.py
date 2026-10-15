@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from rest_framework import viewsets, mixins, permissions, status
+from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -11,7 +11,7 @@ from apps.core.services import enregistrer as journaliser
 from apps.core.utils import lire_date, lire_id
 from apps.notifications.services import notifier, notifier_par_email
 from apps.notifications.models import TypeNotification
-from apps.organisations.isolation import est_super_admin, filtrer_par_organisation
+from apps.organisations.isolation import filtrer_par_organisation
 from apps.projets.models import NiveauPriorite
 from apps.utilisateurs.models import Role, StatutAcademique
 
@@ -35,16 +35,6 @@ class EstAdmin(permissions.BasePermission):
         return request.user.is_authenticated and request.user.role == Role.ADMIN
 
 
-class EstAdminOuService(permissions.BasePermission):
-    """
-    Rappels : l'admin d'un établissement (limité à ses réservations) ou le
-    compte de service du workflow d'automatisation, qui a le rôle
-    SUPER_ADMIN et traite les rappels de tous les établissements.
-    """
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and (request.user.role == Role.ADMIN or est_super_admin(request.user))
-
-
 class ReservationViewSet(viewsets.ModelViewSet):
     queryset = Reservation.objects.all()
     serializer_class = ReservationSerializer
@@ -55,8 +45,6 @@ class ReservationViewSet(viewsets.ModelViewSet):
     # on annule et on refait une demande.
     http_method_names = ['get', 'post', 'delete', 'head', 'options']
 
-    ACTIONS_RAPPEL = ['a_rappeler_24h', 'a_rappeler_1h', 'marquer_rappel_24h_envoye', 'marquer_rappel_1h_envoye']
-
     def get_permissions(self):
         if self.action == 'destroy':
             return [EstAdmin()]
@@ -64,10 +52,7 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
     def _base(self):
         """Réservations de l'établissement de l'utilisateur (isolation SaaS)."""
-        user = self.request.user
-        if self.action in self.ACTIONS_RAPPEL and est_super_admin(user):
-            return Reservation.objects.all()
-        return filtrer_par_organisation(Reservation.objects.all(), user, 'laboratoire__organisation')
+        return filtrer_par_organisation(Reservation.objects.all(), self.request.user, 'laboratoire__organisation')
 
     def get_queryset(self):
         user = self.request.user
@@ -115,8 +100,6 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
             if params.get('a_venir') == 'true':
                 qs = qs.filter(date__gte=timezone.localdate())
-        elif self.action in self.ACTIONS_RAPPEL:
-            qs = base
         else:
             qs = base if est_superviseur else base.filter(demandeur=user)
 
@@ -158,6 +141,9 @@ class ReservationViewSet(viewsets.ModelViewSet):
             reservation.preparer([e.id for e in equipements])
             Reservation._verifier_disponibilite(reservation.laboratoire, equipements)
             reservation._verifier_maintenance([e.id for e in equipements])
+            # Annoncé dès la vérification (avant confirmation), revérifié
+            # sous verrou par creer().
+            reservation._verifier_doublon([e.id for e in equipements])
         except DjangoValidationError as e:
             raise DRFValidationError(e.messages)
         return reservation, equipements
@@ -519,48 +505,3 @@ class ReservationViewSet(viewsets.ModelViewSet):
             'auteur_role': e.auteur.get_role_display() if e.auteur else '',
             'date_heure': e.date_heure,
         } for e in entrees])
-
-    # --- Rappels (consommés par le workflow d'automatisation) ---
-    # Le workflow interroge ces endpoints périodiquement, envoie les
-    # rappels, puis appelle marquer_rappel_*_envoye pour ne jamais envoyer
-    # deux fois le même rappel. La fenêtre de tolérance (23h-25h, 0-2h)
-    # évite de rater une réservation si le workflow tourne en léger décalage.
-    # Filtrage en deux temps : le SQL pré-filtre par date (date et heure
-    # sont deux colonnes séparées), puis Python compare le datetime exact.
-
-    def _a_rappeler(self, debut_fenetre, fin_fenetre, champ_envoye):
-        candidates = self.get_queryset().filter(
-            statut=StatutReservation.VALIDEE,
-            date__gte=debut_fenetre.date(),
-            date__lte=fin_fenetre.date(),
-            **{champ_envoye: False},
-        )
-        resultats = [
-            r for r in candidates
-            if debut_fenetre <= timezone.make_aware(datetime.combine(r.date, r.heure_debut)) <= fin_fenetre
-        ]
-        return Response(self.get_serializer(resultats, many=True).data)
-
-    @action(detail=False, methods=['get'], permission_classes=[EstAdminOuService])
-    def a_rappeler_24h(self, request):
-        maintenant = timezone.localtime()
-        return self._a_rappeler(maintenant + timedelta(hours=23), maintenant + timedelta(hours=25), 'rappel_24h_envoye')
-
-    @action(detail=False, methods=['get'], permission_classes=[EstAdminOuService])
-    def a_rappeler_1h(self, request):
-        maintenant = timezone.localtime()
-        return self._a_rappeler(maintenant, maintenant + timedelta(hours=2), 'rappel_1h_envoye')
-
-    @action(detail=True, methods=['post'], permission_classes=[EstAdminOuService])
-    def marquer_rappel_24h_envoye(self, request, pk=None):
-        reservation = self.get_object()
-        reservation.rappel_24h_envoye = True
-        reservation.save(update_fields=['rappel_24h_envoye'])
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=True, methods=['post'], permission_classes=[EstAdminOuService])
-    def marquer_rappel_1h_envoye(self, request, pk=None):
-        reservation = self.get_object()
-        reservation.rappel_1h_envoye = True
-        reservation.save(update_fields=['rappel_1h_envoye'])
-        return Response(status=status.HTTP_204_NO_CONTENT)

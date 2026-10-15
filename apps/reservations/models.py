@@ -154,6 +154,25 @@ class Reservation(models.Model):
                 f"Une maintenance est prévue sur {prevue.equipement.nom} le {self.date:%d/%m/%Y} : choisissez un autre jour."
             )
 
+    def _verifier_doublon(self, equipements_ids):
+        """
+        Un même demandeur ne peut pas avoir deux demandes actives qui se
+        chevauchent sur le même équipement. Une demande EN_ATTENTE ne bloque
+        pas les AUTRES (file d'attente), mais un double envoi (double clic,
+        nouvel essai après un délai dépassé, assistant relancé) créait sinon
+        deux demandes identiques pour la même personne.
+        """
+        if not equipements_ids:
+            return
+        doublon = Reservation.chevauchements(
+            self.date, self.heure_debut, self.heure_fin, equipements_ids,
+            [StatutReservation.EN_ATTENTE, StatutReservation.VALIDEE], exclure_pk=self.pk,
+        ).filter(demandeur_id=self.demandeur_id).first()
+        if doublon:
+            raise ValidationError(
+                f"Vous avez déjà une demande ({doublon.get_statut_display().lower()}) sur ce créneau pour cet équipement."
+            )
+
     @staticmethod
     def _verifier_equipements(laboratoire, equipements_ids):
         # On compte les équipements qui correspondent à la fois aux ids
@@ -294,6 +313,9 @@ class Reservation(models.Model):
 
             if self._a_un_conflit(self.date, self.heure_debut, self.heure_fin, equipements_ids):
                 raise ValidationError("Un des équipements sélectionnés est déjà réservé sur ce créneau.")
+            # Sous le verrou : deux envois simultanés de la même demande ne
+            # passent pas tous les deux.
+            self._verifier_doublon(equipements_ids)
             self._verifier_maintenance(equipements_ids)
 
             a_des_concurrentes = self.concurrentes(equipements_ids).exists()

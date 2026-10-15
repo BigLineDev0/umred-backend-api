@@ -43,7 +43,10 @@ class MaintenanceViewSet(viewsets.ModelViewSet):
         equipement_id = lire_id(self.request, 'equipement')
 
         base = filtrer_par_organisation(Maintenance.objects.all(), user, 'equipement__laboratoire__organisation')
-        if user.role == Role.ADMIN or equipement_id:
+        # Le filtre par équipement élargit la consultation (historique de la
+        # fiche équipement), jamais les actions : un technicien n'agit que
+        # sur ses interventions ou sur les pannes encore non prises en charge.
+        if user.role == Role.ADMIN or (equipement_id and self.action in ('list', 'retrieve')):
             qs = base
         else:
             # Un technicien voit ses propres interventions assignées, PLUS
