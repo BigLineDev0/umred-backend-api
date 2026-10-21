@@ -134,9 +134,11 @@ services:
       # Écrase la valeur du .env (localhost) : Django est joignable par son
       # nom de service sur le réseau Docker interne.
       DJANGO_API_URL: http://backend:8000/api
-      # Doit être identique à la SECRET_KEY de Django (signature des JWT) :
-      # reprise directement du .env du backend, aucun risque de décalage.
-      JWT_SECRET_KEY: ${SECRET_KEY}
+      # Doit être identique à la clé qui signe les JWT côté Django :
+      # JWT_SIGNING_KEY si elle est définie (recommandé, le service IA n'a
+      # alors pas besoin de SECRET_KEY), sinon SECRET_KEY. Reprise du .env
+      # du backend, aucun risque de décalage.
+      JWT_SECRET_KEY: ${JWT_SIGNING_KEY:-${SECRET_KEY}}
       # Même secret que les tâches Django : autorise le workflow n8n à faire
       # rédiger la synthèse hebdomadaire (POST /api/pilotage/synthese/rediger).
       TACHES_TOKEN: ${TACHES_TOKEN:-}

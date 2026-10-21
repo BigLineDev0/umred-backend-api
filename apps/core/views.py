@@ -250,6 +250,9 @@ def rapports_export_excel(request):
     for col, w in zip('ABCDEFGH', [12, 8, 8, 26, 30, 22, 18, 12]):
         ws5.column_dimensions[col].width = w
 
+    # Comme pour le PDF : un rapport exporté sort de la plateforme, on trace qui l'a extrait.
+    journaliser(request.user, "Export du rapport d'activité (Excel)", None,
+                f"Période {date_debut or '—'} → {date_fin or '—'}" + (f", laboratoire n°{laboratoire_id}" if laboratoire_id else ''))
     response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     response['Content-Disposition'] = f'attachment; filename="rapport_senlab_{datetime.now():%Y%m%d}.xlsx"'
     wb.save(response)

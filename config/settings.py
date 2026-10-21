@@ -166,6 +166,11 @@ SPECTACULAR_SETTINGS = {
 
 # --- Durée de vie des jetons JWT ---
 SIMPLE_JWT = {
+    # Clé dédiée aux jetons : le service IA doit la connaître pour vérifier
+    # les jetons, il n'a pas à détenir SECRET_KEY (qui signe aussi les
+    # sessions de l'admin Django). Sans JWT_SIGNING_KEY, SECRET_KEY reste
+    # utilisée : les déploiements existants continuent de fonctionner.
+    'SIGNING_KEY': env('JWT_SIGNING_KEY', default=SECRET_KEY),
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,

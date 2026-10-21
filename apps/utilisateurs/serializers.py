@@ -30,6 +30,12 @@ def verifier_robustesse(password, utilisateur):
         raise serializers.ValidationError({'password': e.messages})
 
 
+def valider_photo(value):
+    if value and value.size > 5 * 1024 * 1024:
+        raise serializers.ValidationError("L'image ne doit pas dépasser 5 Mo.")
+    return value
+
+
 def verifier_email_unique(email, instance=None):
     # Comparaison insensible à la casse, et stockage en minuscules.
     email = email.lower()
@@ -214,6 +220,11 @@ class UtilisateurSerializer(ChampsOrganisationMixin, serializers.ModelSerializer
     def validate_telephone(self, value):
         return valider_telephone_senegal(value)
 
+    # La photo est aussi modifiable par l'admin (PATCH /utilisateurs/<id>/) :
+    # même limite que sur « Mon profil ».
+    def validate_photo(self, value):
+        return valider_photo(value)
+
     def validate(self, attrs):
         verifier_changement_role(attrs, self.instance, self.context.get('request'))
         return verifier_encadrant(attrs, self.instance)
@@ -301,6 +312,4 @@ class MonProfilUpdateSerializer(serializers.ModelSerializer):
         return valider_telephone_senegal(value)
 
     def validate_photo(self, value):
-        if value and value.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("L'image ne doit pas dépasser 5 Mo.")
-        return value
+        return valider_photo(value)
